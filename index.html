@@ -290,7 +290,39 @@ var GDrive=(function(){
     folder(folderName,tok).then(function(f){doUp(f?f.id:null);}).catch(function(e){cb(e.message);});
   }
 
-  return{isValid:isValid,getToken:getToken,upload:upload,clear:clear};
+
+  // Upload a small JSON file (app data backup)
+  function uploadJSON(tok, folderName, filename, obj, existId, cb){
+    var json = JSON.stringify(obj);
+    var b64  = btoa(unescape(encodeURIComponent(json)));
+    upload(tok, folderName, filename, b64, 'application/json', existId, cb);
+  }
+
+  // Download a file by ID and parse as JSON
+  function downloadJSON(tok, fileId, cb){
+    fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media',
+      {headers:{Authorization:'Bearer '+tok}})
+    .then(function(r){return r.text();})
+    .then(function(t){
+      try{ cb(null, JSON.parse(t)); }
+      catch(e){ cb('Invalid JSON: '+e.message); }
+    }).catch(function(e){ cb(e.message); });
+  }
+
+  // Find a file by name in a folder
+  function findFile(tok, folderName, filename, cb){
+    folder(folderName, tok).then(function(f){
+      if(!f||!f.id){cb(null,null);return;}
+      var q="name='"+filename+"' and '"+f.id+"' in parents and trashed=false";
+      fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name)',
+        {headers:{Authorization:'Bearer '+tok}})
+      .then(function(r){return r.json();})
+      .then(function(r){ cb(null, r.files&&r.files.length?r.files[0]:null); })
+      .catch(function(e){ cb(e.message); });
+    }).catch(function(e){ cb(e.message); });
+  }
+
+  return{isValid:isValid,getToken:getToken,upload:upload,uploadJSON:uploadJSON,downloadJSON:downloadJSON,findFile:findFile,clear:clear};
 })();
 
 // OneDrive PKCE
@@ -346,7 +378,39 @@ var OneDrive=(function(){
       {method:'PUT',headers:{Authorization:'Bearer '+tok,'Content-Type':'application/octet-stream'},body:bytes.buffer})
     .then(function(r){return r.json();}).then(function(r){cb(r&&r.id?null:(r.error&&r.error.message)||'Upload failed',r&&r.id);}).catch(function(e){cb(e.message);});
   }
-  return{isValid:isValid,getToken:getToken,upload:upload,clear:clear};
+
+  // Upload a small JSON file (app data backup)
+  function uploadJSON(tok, folderName, filename, obj, existId, cb){
+    var json = JSON.stringify(obj);
+    var b64  = btoa(unescape(encodeURIComponent(json)));
+    upload(tok, folderName, filename, b64, 'application/json', existId, cb);
+  }
+
+  // Download a file by ID and parse as JSON
+  function downloadJSON(tok, fileId, cb){
+    fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media',
+      {headers:{Authorization:'Bearer '+tok}})
+    .then(function(r){return r.text();})
+    .then(function(t){
+      try{ cb(null, JSON.parse(t)); }
+      catch(e){ cb('Invalid JSON: '+e.message); }
+    }).catch(function(e){ cb(e.message); });
+  }
+
+  // Find a file by name in a folder
+  function findFile(tok, folderName, filename, cb){
+    folder(folderName, tok).then(function(f){
+      if(!f||!f.id){cb(null,null);return;}
+      var q="name='"+filename+"' and '"+f.id+"' in parents and trashed=false";
+      fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name)',
+        {headers:{Authorization:'Bearer '+tok}})
+      .then(function(r){return r.json();})
+      .then(function(r){ cb(null, r.files&&r.files.length?r.files[0]:null); })
+      .catch(function(e){ cb(e.message); });
+    }).catch(function(e){ cb(e.message); });
+  }
+
+  return{isValid:isValid,getToken:getToken,upload:upload,uploadJSON:uploadJSON,downloadJSON:downloadJSON,findFile:findFile,clear:clear};
 })();
 
 </script>
@@ -791,6 +855,47 @@ function DriveSync(p){
   }
   function gdSignOut(){GDrive.clear();setGcon(false);addLog('Signed out','info');}
 
+  function fetchFromDrive(){
+    setBusy(true);setLog([]);
+    addLog('Connecting to Google Drive...','info');
+    GDrive.getToken(gcid,function(tok,err){
+      if(err){addLog('Auth error: '+err,'error');setBusy(false);setGcon(false);return;}
+      setGcon(true);
+      var fn=gf.trim()||'Krazy Wholesale Invoices';
+      var dataFid=localStorage.getItem('gd_data_fid');
+      function doLoad(fid){
+        addLog('Downloading sync data from Drive...','info');
+        GDrive.downloadJSON(tok,fid,function(err2,data){
+          if(err2){addLog('Download error: '+err2,'error');setBusy(false);return;}
+          if(!data||!data.invoices){addLog('No data found in Drive file','error');setBusy(false);return;}
+          // Apply the data — Drive wins
+          if(data.invoices){p.setInvoices(data.invoices);addLog('✓ '+data.invoices.length+' invoices loaded','success');}
+          if(data.customers){p.setCusts(data.customers);addLog('✓ '+data.customers.length+' customers loaded','success');}
+          if(data.items){p.setItems(data.items);addLog('✓ '+data.items.length+' items loaded','success');}
+          if(data.rates){p.setRates(data.rates);}
+          if(data.invS){p.setInvS(data.invS);}
+          if(data.savedAt){addLog('Data saved on: '+new Date(data.savedAt).toLocaleString(),'info');}
+          addLog('--- All data loaded from Drive ---','success');
+          setBusy(false);
+        });
+      }
+      if(dataFid){
+        doLoad(dataFid);
+      } else {
+        addLog('Searching for sync data in Drive...','info');
+        GDrive.findFile(tok,fn,'kw_data.json',function(err2,file){
+          if(err2||!file){
+            addLog('No sync data found in Drive folder "'+fn+'".','error');
+            addLog('Sync your data first from the device where invoices are created.','info');
+            setBusy(false);return;
+          }
+          localStorage.setItem('gd_data_fid',file.id);
+          doLoad(file.id);
+        });
+      }
+    });
+  }
+
   function gdUploadOne(inv,tok,cb){
     addLog('Rendering '+inv.number+'...','info');
     toPDF(buildHTML(inv),function(err,b64){
@@ -806,17 +911,43 @@ function DriveSync(p){
     setBusy(true);setLog([]);
     GDrive.getToken(gcid,function(tok,err){
       if(err){addLog('Auth: '+err,'error');setBusy(false);setGcon(false);return;}
-      setGcon(true);var ns=sids.slice(),idx=0,fn=gf.trim()||'Krazy Wholesale Invoices';
+      setGcon(true);
+      var ns=sids.slice(),idx=0,fn=gf.trim()||'Krazy Wholesale Invoices';
+      var totalSteps=pending.length+2; // +Excel +JSON
       function next(){
         if(idx>=pending.length){
-          setProg({cur:pending.length+1,tot:pending.length+1,lbl:'Invoice_Master.xlsx'});
-          GDrive.upload(tok,fn,'Invoice_Master.xlsx',buildXLSX(p.invoices),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',gMid||null,function(err2,fid){
-            if(!err2&&fid){setGMid(fid);localStorage.setItem('gd_mid',fid);addLog('\u2713 Invoice_Master.xlsx','success');}
-            setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));
-            setBusy(false);setProg({cur:0,tot:0,lbl:''});addLog('--- Complete ---','success');
-          });return;
+          // Step: Upload Invoice_Master.xlsx
+          setProg({cur:pending.length+1,tot:totalSteps,lbl:'Invoice_Master.xlsx'});
+          addLog('Uploading Invoice_Master.xlsx...','info');
+          GDrive.upload(tok,fn,'Invoice_Master.xlsx',buildXLSX(p.invoices),
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',gMid||null,
+            function(err2,fid){
+              if(!err2&&fid){setGMid(fid);localStorage.setItem('gd_mid',fid);addLog('\u2713 Invoice_Master.xlsx','success');}
+              // Step: Upload kw_data.json (used for cross-device sync)
+              setProg({cur:totalSteps,tot:totalSteps,lbl:'Saving sync data...'});
+              addLog('Saving sync data (kw_data.json)...','info');
+              var dataFid=localStorage.getItem('gd_data_fid')||null;
+              var appData={
+                version:2,
+                savedAt:new Date().toISOString(),
+                invoices:p.invoices,
+                customers:p.custs,
+                items:p.items,
+                rates:p.rates,
+                invS:p.invS
+              };
+              GDrive.uploadJSON(tok,fn,'kw_data.json',appData,dataFid,function(err3,jfid){
+                if(!err3&&jfid){localStorage.setItem('gd_data_fid',jfid);addLog('\u2713 Sync data saved','success');}
+                else if(err3){addLog('Sync data warning: '+err3,'info');}
+                setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));
+                setBusy(false);setProg({cur:0,tot:0,lbl:''});
+                addLog('--- Sync complete. Open app on any device to load this data. ---','success');
+              });
+            });
+          return;
         }
-        var inv=pending[idx];setProg({cur:idx+1,tot:pending.length+1,lbl:inv.number});
+        var inv=pending[idx];
+        setProg({cur:idx+1,tot:totalSteps,lbl:inv.number});
         gdUploadOne(inv,tok,function(ok){if(ok)ns.push(inv.id);idx++;setTimeout(next,300);});
       }
       next();
@@ -897,7 +1028,8 @@ function DriveSync(p){
       h('span',{style:{color:'var(--txt3)'}},'|'),
       ocon?h('span',{style:{fontSize:12,color:'var(--acc3)'}},'OneDrive \u25CF'):h('span',{style:{fontSize:12,color:'var(--txt3)'}},'OneDrive \u25CB'),
       h('div',{style:{flex:1}}),
-      h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setSids([]);localStorage.removeItem('synced_ids');addLog('Reset','info');}},'\u21BA Reset')
+      h('button',{className:'btn btn-sm btn-primary',disabled:busy,onClick:fetchFromDrive,style:{display:gcon?'inline-flex':'none'}},'↓ Fetch from Drive'),
+      h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setSids([]);localStorage.removeItem('synced_ids');addLog('Reset','info');}},'↺ Reset')
     ),
     h('div',{className:'tabs'},TABS.map(function(t){return h('button',{key:t.id,className:'tbtn'+(activeTab===t.id?' active':''),onClick:function(){setActiveTab(t.id);}},t.lbl);})),
 
@@ -1093,11 +1225,74 @@ function App(){
   var RA=useState(function(){return lsGet('kw_rates',IR);}),rates=RA[0],_setRates=RA[1];
   var IN=useState(function(){return lsGet('kw_invoices',[]);}),invoices=IN[0],_setInvoices=IN[1];
   var IS=useState(function(){return lsGet('kw_invS',{prefix:'INV',separator:'-',nextNum:'1001',padding:'4'});}),invS=IS[0],_setInvS=IS[1];
+  var _sync=useState('idle'),syncStatus=_sync[0],setSyncStatus=_sync[1]; // idle|loading|loaded|error
+
   function setCusts(v){var val=typeof v==='function'?v(custs):v;_setCusts(val);lsSet('kw_custs',val);}
   function setItems(v){var val=typeof v==='function'?v(items):v;_setItems(val);lsSet('kw_items',val);}
   function setRates(v){var val=typeof v==='function'?v(rates):v;_setRates(val);lsSet('kw_rates',val);}
   function setInvoices(v){var val=typeof v==='function'?v(invoices):v;_setInvoices(val);lsSet('kw_invoices',val);}
   function setInvS(v){var val=typeof v==='function'?v(invS):v;_setInvS(val);lsSet('kw_invS',val);}
+
+  // ── Auto-fetch from Google Drive on startup ──
+  useEffect(function(){
+    var cid = localStorage.getItem('gd_cid');
+    var folder = localStorage.getItem('gd_folder') || 'Krazy Wholesale Invoices';
+    var dataFileId = localStorage.getItem('gd_data_fid');
+    if(!cid || !GDrive.isValid()) return; // not connected, skip
+    setSyncStatus('loading');
+    GDrive.getToken(cid, function(tok, err){
+      if(err || !tok){ setSyncStatus('idle'); return; }
+      // Try by stored file ID first (fast), fall back to search
+      function loadByToken(fid){
+        GDrive.downloadJSON(tok, fid, function(err2, data){
+          if(err2 || !data){ setSyncStatus('error'); return; }
+          applyDriveData(data);
+          setSyncStatus('loaded');
+        });
+      }
+      if(dataFileId){
+        loadByToken(dataFileId);
+      } else {
+        GDrive.findFile(tok, folder, 'kw_data.json', function(err2, file){
+          if(err2 || !file){ setSyncStatus('idle'); return; }
+          localStorage.setItem('gd_data_fid', file.id);
+          loadByToken(file.id);
+        });
+      }
+    });
+  }, []);
+
+  function applyDriveData(data){
+    // Merge Drive data with local — Drive wins for invoices, merge customers/items
+    if(data.invoices && data.invoices.length){
+      // Merge: keep local invoices not in Drive, add Drive invoices
+      _setInvoices(function(local){
+        var merged = data.invoices.slice();
+        local.forEach(function(li){
+          if(!merged.find(function(di){return di.id===li.id;})) merged.push(li);
+        });
+        merged.sort(function(a,b){return a.id-b.id;});
+        lsSet('kw_invoices', merged);
+        return merged;
+      });
+    }
+    if(data.customers && data.customers.length){
+      _setCusts(function(local){
+        var merged=data.customers.slice();
+        local.forEach(function(li){if(!merged.find(function(di){return di.id===li.id;}))merged.push(li);});
+        lsSet('kw_custs',merged); return merged;
+      });
+    }
+    if(data.items && data.items.length){
+      _setItems(function(local){
+        var merged=data.items.slice();
+        local.forEach(function(li){if(!merged.find(function(di){return di.id===li.id;}))merged.push(li);});
+        lsSet('kw_items',merged); return merged;
+      });
+    }
+    if(data.rates) { _setRates(data.rates); lsSet('kw_rates',data.rates); }
+    if(data.invS)  { _setInvS(data.invS);   lsSet('kw_invS',data.invS);  }
+  }
   var NAV=[{id:'dashboard',icon:'\uD83D\uDCCA',lbl:'Dashboard'},{id:'customers',icon:'\uD83D\uDC64',lbl:'Customers'},{id:'items',icon:'\uD83D\uDCE6',lbl:'Item Master'},{id:'rates',icon:'\uD83D\uDCB2',lbl:'Cust. Rates'},{id:'newInvoice',icon:'\u2795',lbl:'New Invoice'},{id:'invoices',icon:'\uD83D\uDCC4',lbl:'Invoices'},{id:'invSettings',icon:'\u2699\uFE0F',lbl:'Inv. Series'},{id:'sync',icon:'\u2601\uFE0F',lbl:'Drive Sync'},{id:'backup',icon:'\uD83D\uDDAB',lbl:'Backup'}];
   return h('div',{className:'app'},
     h('div',{className:'sidebar'},
@@ -1106,6 +1301,9 @@ function App(){
       h('div',{className:'sidebar-footer'},'Krazy Wholesale LLC')
     ),
     h('div',{className:'main'},
+      syncStatus==='loading'&&h('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',marginBottom:14,background:'rgba(0,229,160,.07)',border:'1px solid rgba(0,229,160,.2)',borderRadius:8,fontSize:12,color:'var(--acc)'}},h('span',null,'\u23F3'),h('span',null,'Loading your data from Google Drive...')),
+      syncStatus==='loaded'&&h('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',marginBottom:14,background:'rgba(0,229,160,.07)',border:'1px solid rgba(0,229,160,.2)',borderRadius:8,fontSize:12,color:'var(--acc)'}},h('span',null,'\u2705'),h('span',null,'Data loaded from Google Drive'),h('button',{style:{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',fontSize:16,color:'var(--txt3)'},onClick:function(){setSyncStatus('idle');}},h('span',null,'\xD7'))),
+      syncStatus==='error'&&h('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',marginBottom:14,background:'rgba(255,77,109,.07)',border:'1px solid rgba(255,77,109,.2)',borderRadius:8,fontSize:12,color:'var(--danger)'}},h('span',null,'\u26A0\uFE0F'),h('span',null,'Could not load from Drive. Showing local data.'),h('button',{style:{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',fontSize:16,color:'var(--txt3)'},onClick:function(){setSyncStatus('idle');}},h('span',null,'\xD7'))),
       page==='dashboard'  &&h(Dashboard,{custs:custs,items:items,invoices:invoices,setPage:setPage}),
       page==='customers'  &&h(Customers,{custs:custs,setCusts:setCusts}),
       page==='items'      &&h(Items,{items:items,setItems:setItems}),
@@ -1113,7 +1311,7 @@ function App(){
       page==='newInvoice' &&h(NewInvoice,{custs:custs,items:items,rates:rates,invoices:invoices,setInvoices:setInvoices,setPage:setPage,invS:invS,setInvS:setInvS}),
       page==='invoices'   &&h(InvoiceList,{invoices:invoices,setInvoices:setInvoices}),
       page==='invSettings'&&h(InvSeries,{invS:invS,setInvS:setInvS}),
-      page==='sync'       &&h(DriveSync,{invoices:invoices}),
+      page==='sync'       &&h(DriveSync,{invoices:invoices,custs:custs,items:items,rates:rates,invS:invS,setInvoices:setInvoices,setCusts:setCusts,setItems:setItems,setRates:setRates,setInvS:setInvS}),
       page==='backup'     &&h(Backup,{custs:custs,items:items,rates:rates,invoices:invoices,invS:invS,setCusts:setCusts,setItems:setItems,setRates:setRates,setInvoices:setInvoices,setInvS:setInvS})
     )
   );
