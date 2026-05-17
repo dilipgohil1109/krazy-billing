@@ -201,6 +201,55 @@ function pkce_challenge(v){return crypto.subtle.digest('SHA-256',new TextEncoder
   }
 })();
 
+// ── Background auto-sync: called when invoice is saved ──
+// Runs silently - uploads the new invoice PDF + updates kw_data.json
+// Only runs if GDrive token is currently valid (user already connected)
+function autoSyncToDrive(newInv, allInvoices){
+  if(!GDrive.isValid()) return; // not connected, skip silently
+  var cid    = localStorage.getItem('gd_cid') || '';
+  var folder = localStorage.getItem('gd_folder') || 'Krazy Wholesale Invoices';
+  if(!cid) return;
+
+  GDrive.getToken(cid, function(tok, err){
+    if(err || !tok) return; // token failed, skip silently
+
+    // 1. Upload the new invoice PDF
+    toPDF(buildHTML(newInv), function(pdfErr, b64){
+      if(!pdfErr && b64){
+        GDrive.upload(tok, folder, newInv.number+'.pdf', b64, 'application/pdf', null, function(){
+          // Mark as synced
+          try{
+            var sids = JSON.parse(localStorage.getItem('synced_ids')||'[]');
+            if(!sids.includes(newInv.id)){
+              sids.push(newInv.id);
+              localStorage.setItem('synced_ids', JSON.stringify(sids));
+            }
+          }catch(e){}
+        });
+      }
+
+      // 2. Update kw_data.json with all current data (runs regardless of PDF result)
+      var custs  = JSON.parse(localStorage.getItem('kw_custs')  || '[]');
+      var items  = JSON.parse(localStorage.getItem('kw_items')  || '[]');
+      var rates  = JSON.parse(localStorage.getItem('kw_rates')  || '{}');
+      var invS   = JSON.parse(localStorage.getItem('kw_invS')   || '{}');
+      var appData = {
+        version:2,
+        savedAt: new Date().toISOString(),
+        invoices: allInvoices,
+        customers: custs,
+        items: items,
+        rates: rates,
+        invS: invS
+      };
+      var dataFid = localStorage.getItem('gd_data_fid') || null;
+      GDrive.uploadJSON(tok, 'kw_data.json', appData, dataFid, function(err2, fid){
+        if(!err2 && fid) localStorage.setItem('gd_data_fid', fid);
+      });
+    });
+  });
+}
+
 // Google Drive — uses Google Identity Services (GIS) token model
 // No client_secret needed. No PKCE. Works in any browser.
 // GIS library is loaded on demand when user clicks Sign In.
@@ -699,9 +748,12 @@ function NewInvoice(p){
   function canSave(){if(!selC||!lines.length)return false;if(invType==='nontaxable'&&(!ntv||!ntv.ok||ntv.hasErr))return false;return true;}
   function save(){
     var inv={id:Date.now(),number:invNum.trim()||buildNo(p.invS),date:invDate,customerId:cust.id,customerName:cust.businessName,contactName:cust.contactName,address:cust.address,type:invType,taxPct:invType==='taxable'?parseFloat(taxPct)||0:0,lineItems:lines.map(function(l){return{name:l.name,qty:parseFloat(l.qty)||0,rate:parseFloat(l.rate)||0,origRate:l.origRate};}),subtotal:invType==='taxable'?sub:parseFloat(invTot)||0,taxAmount:invType==='taxable'?taxAmt:0,grandTotal:invType==='taxable'?grand:parseFloat(invTot)||0};
+    var newInvoices=p.invoices.concat([inv]);
     p.setInvoices(function(is){return is.concat([inv]);});
     p.setInvS(function(s){return Object.assign({},s,{nextNum:String((parseInt(s.nextNum)||1)+1)});});
     p.setPage('invoices');
+    // Auto-sync to Drive in background if connected
+    autoSyncToDrive(inv, newInvoices);
   }
   return h('div',null,
     h('div',{className:'page-hdr'},h('h2',null,'New Invoice')),
@@ -1172,7 +1224,7 @@ function DriveSync(p){
 
     log.length>0&&h('div',{className:'card',style:{marginTop:14}},
       h('div',{className:'card-header'},h('h3',null,'Log'),h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setLog([]);}},'Clear')),
-      h('div',{className:'log-box'},log.map(function(e,i){return h('div',{key:i,className:'log-line',style:{color:e.type==='error'?'var(--danger)':e.type==='success'?'var(--acc)':'var(--txt2)'}},h('span',{style:{color:'var(--txt3)',flexShrink:0}},e.t),h('span',null,e.msg));}))
+      h('div',{className:'log-box'},log.map(function(e,i){return h('div',{key:i,className:'log-line',style:{color:e.type==='error'?'var(--danger)':'var(--acc)'}},h('span',{style:{color:'var(--txt3)',flexShrink:0}},e.t),h('span',null,e.msg));}))
     )
   );
 }
