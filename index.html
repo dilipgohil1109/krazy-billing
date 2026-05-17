@@ -291,36 +291,44 @@ var GDrive=(function(){
   }
 
 
-  // Upload a small JSON file (app data backup)
-  function uploadJSON(tok, folderName, filename, obj, existId, cb){
+  // Upload sync JSON to Drive ROOT (no subfolder) so any device can find it
+  function uploadJSON(tok, filename, obj, existId, cb){
     var json = JSON.stringify(obj);
-    var b64  = btoa(unescape(encodeURIComponent(json)));
-    upload(tok, folderName, filename, b64, 'application/json', existId, cb);
+    // Safe base64 encoding that handles Unicode
+    var bytes = new TextEncoder().encode(json);
+    var b64 = btoa(String.fromCharCode.apply(null, bytes));
+    // Always store in root - no folder - makes cross-device discovery reliable
+    upload(tok, null, filename, b64, 'application/json', existId, cb);
   }
 
-  // Download a file by ID and parse as JSON
+  // Download and parse JSON from Drive by file ID
   function downloadJSON(tok, fileId, cb){
     fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media',
       {headers:{Authorization:'Bearer '+tok}})
-    .then(function(r){return r.text();})
+    .then(function(r){
+      if(!r.ok){cb('HTTP '+r.status);return;}
+      return r.text();
+    })
     .then(function(t){
+      if(!t){cb('Empty response');return;}
       try{ cb(null, JSON.parse(t)); }
-      catch(e){ cb('Invalid JSON: '+e.message); }
+      catch(e){ cb('Parse error: '+e.message); }
     }).catch(function(e){ cb(e.message); });
   }
 
-  // Find a file by name in a folder
+  // Find kw_data.json anywhere in Drive (searches all files, not just subfolder)
   function findFile(tok, folderName, filename, cb){
-    folder(folderName, tok).then(function(f){
-      if(!f||!f.id){cb(null,null);return;}
-      var q="name='"+filename+"' and '"+f.id+"' in parents and trashed=false";
-      fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name)',
-        {headers:{Authorization:'Bearer '+tok}})
-      .then(function(r){return r.json();})
-      .then(function(r){ cb(null, r.files&&r.files.length?r.files[0]:null); })
-      .catch(function(e){ cb(e.message); });
+    // Search entire Drive for the file by name - most reliable cross-device
+    var q = "name='"+filename+"' and trashed=false";
+    fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name,modifiedTime)&orderBy=modifiedTime+desc',
+      {headers:{Authorization:'Bearer '+tok}})
+    .then(function(r){return r.json();})
+    .then(function(r){
+      cb(null, r.files&&r.files.length?r.files[0]:null);
     }).catch(function(e){ cb(e.message); });
   }
+
+
 
   return{isValid:isValid,getToken:getToken,upload:upload,uploadJSON:uploadJSON,downloadJSON:downloadJSON,findFile:findFile,clear:clear};
 })();
@@ -379,36 +387,44 @@ var OneDrive=(function(){
     .then(function(r){return r.json();}).then(function(r){cb(r&&r.id?null:(r.error&&r.error.message)||'Upload failed',r&&r.id);}).catch(function(e){cb(e.message);});
   }
 
-  // Upload a small JSON file (app data backup)
-  function uploadJSON(tok, folderName, filename, obj, existId, cb){
+  // Upload sync JSON to Drive ROOT (no subfolder) so any device can find it
+  function uploadJSON(tok, filename, obj, existId, cb){
     var json = JSON.stringify(obj);
-    var b64  = btoa(unescape(encodeURIComponent(json)));
-    upload(tok, folderName, filename, b64, 'application/json', existId, cb);
+    // Safe base64 encoding that handles Unicode
+    var bytes = new TextEncoder().encode(json);
+    var b64 = btoa(String.fromCharCode.apply(null, bytes));
+    // Always store in root - no folder - makes cross-device discovery reliable
+    upload(tok, null, filename, b64, 'application/json', existId, cb);
   }
 
-  // Download a file by ID and parse as JSON
+  // Download and parse JSON from Drive by file ID
   function downloadJSON(tok, fileId, cb){
     fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media',
       {headers:{Authorization:'Bearer '+tok}})
-    .then(function(r){return r.text();})
+    .then(function(r){
+      if(!r.ok){cb('HTTP '+r.status);return;}
+      return r.text();
+    })
     .then(function(t){
+      if(!t){cb('Empty response');return;}
       try{ cb(null, JSON.parse(t)); }
-      catch(e){ cb('Invalid JSON: '+e.message); }
+      catch(e){ cb('Parse error: '+e.message); }
     }).catch(function(e){ cb(e.message); });
   }
 
-  // Find a file by name in a folder
+  // Find kw_data.json anywhere in Drive (searches all files, not just subfolder)
   function findFile(tok, folderName, filename, cb){
-    folder(folderName, tok).then(function(f){
-      if(!f||!f.id){cb(null,null);return;}
-      var q="name='"+filename+"' and '"+f.id+"' in parents and trashed=false";
-      fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name)',
-        {headers:{Authorization:'Bearer '+tok}})
-      .then(function(r){return r.json();})
-      .then(function(r){ cb(null, r.files&&r.files.length?r.files[0]:null); })
-      .catch(function(e){ cb(e.message); });
+    // Search entire Drive for the file by name - most reliable cross-device
+    var q = "name='"+filename+"' and trashed=false";
+    fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name,modifiedTime)&orderBy=modifiedTime+desc',
+      {headers:{Authorization:'Bearer '+tok}})
+    .then(function(r){return r.json();})
+    .then(function(r){
+      cb(null, r.files&&r.files.length?r.files[0]:null);
     }).catch(function(e){ cb(e.message); });
   }
+
+
 
   return{isValid:isValid,getToken:getToken,upload:upload,uploadJSON:uploadJSON,downloadJSON:downloadJSON,findFile:findFile,clear:clear};
 })();
@@ -936,12 +952,16 @@ function DriveSync(p){
                 rates:p.rates,
                 invS:p.invS
               };
-              GDrive.uploadJSON(tok,fn,'kw_data.json',appData,dataFid,function(err3,jfid){
-                if(!err3&&jfid){localStorage.setItem('gd_data_fid',jfid);addLog('\u2713 Sync data saved','success');}
-                else if(err3){addLog('Sync data warning: '+err3,'info');}
+              GDrive.uploadJSON(tok,'kw_data.json',appData,dataFid,function(err3,jfid){
+                if(!err3&&jfid){
+                  localStorage.setItem('gd_data_fid',jfid);
+                  addLog('\u2713 kw_data.json saved (cross-device sync ready)','success');
+                } else {
+                  addLog('\u26A0 kw_data.json error: '+(err3||'unknown'),'error');
+                }
                 setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));
                 setBusy(false);setProg({cur:0,tot:0,lbl:''});
-                addLog('--- Sync complete. Open app on any device to load this data. ---','success');
+                addLog('--- Sync complete. Open app on any device to fetch this data. ---','success');
               });
             });
           return;
