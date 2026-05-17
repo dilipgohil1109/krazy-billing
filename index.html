@@ -187,17 +187,7 @@ function pkce_challenge(v){return crypto.subtle.digest('SHA-256',new TextEncoder
   sessionStorage.removeItem('pkce_v_'+state);sessionStorage.removeItem('pkce_p_'+state);
   if(!verifier){localStorage.setItem('oauth_result',JSON.stringify({error:'verifier_missing'}));return;}
   var redir=window.location.origin+window.location.pathname;
-  if(provider==='google'){
-    fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body:'grant_type=authorization_code&client_id='+encodeURIComponent(localStorage.getItem('gd_cid')||'')+'&code='+encodeURIComponent(code)+'&redirect_uri='+encodeURIComponent(redir)+'&code_verifier='+encodeURIComponent(verifier)})
-    .then(function(r){return r.json();}).then(function(d){
-      if(d.access_token){
-        localStorage.setItem('gd_tok',d.access_token);localStorage.setItem('gd_exp',String(Date.now()+(parseInt(d.expires_in)||3600)*1000-60000));
-        if(d.refresh_token)localStorage.setItem('gd_ref',d.refresh_token);
-        localStorage.setItem('oauth_result',JSON.stringify({ok:true,provider:'google'}));
-      }else{localStorage.setItem('oauth_result',JSON.stringify({error:d.error_description||d.error,provider:'google'}));}
-    }).catch(function(e){localStorage.setItem('oauth_result',JSON.stringify({error:e.message,provider:'google'}));});
-  }
+  // Google now uses GIS token model (no redirect needed)
   if(provider==='onedrive'){
     fetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:'grant_type=authorization_code&client_id=e40a53ec-44f9-42b3-b3bc-a7d5db58bf49&code='+encodeURIComponent(code)+'&redirect_uri='+encodeURIComponent(redir)+'&code_verifier='+encodeURIComponent(verifier)+'&scope='+encodeURIComponent('Files.ReadWrite offline_access')})
@@ -211,74 +201,95 @@ function pkce_challenge(v){return crypto.subtle.digest('SHA-256',new TextEncoder
   }
 })();
 
-// Google Drive PKCE
+// Google Drive — uses Google Identity Services (GIS) token model
+// No client_secret needed. No PKCE. Works in any browser.
+// GIS library is loaded on demand when user clicks Sign In.
 var GDrive=(function(){
-  function isValid(){return!!localStorage.getItem('gd_tok')&&Date.now()<parseInt(localStorage.getItem('gd_exp')||0);}
-  function clear(){['gd_tok','gd_exp','gd_ref'].forEach(function(k){localStorage.removeItem(k);});}
-  function doAuth(clientId,cb){
-    var ver=pkce_random(64),state=pkce_random(16);
-    sessionStorage.setItem('pkce_v_'+state,ver);sessionStorage.setItem('pkce_p_'+state,'google');
-    var redir=window.location.origin+window.location.pathname;
-    pkce_challenge(ver).then(function(ch){
-      var url='https://accounts.google.com/o/oauth2/v2/auth?client_id='+encodeURIComponent(clientId)+'&redirect_uri='+encodeURIComponent(redir)+'&response_type=code&scope='+encodeURIComponent('https://www.googleapis.com/auth/drive.file')+'&code_challenge='+ch+'&code_challenge_method=S256&state='+state+'&access_type=offline&prompt=consent';
-      var pop=null;try{pop=window.open(url,'gdauth','width=500,height=640,scrollbars=yes');}catch(e){}
-      if(!pop||pop.closed||typeof pop.closed==='undefined'){window.location.href=url;return;}
-      var iv=setInterval(function(){
-        try{var href=pop.location.href;
-          if(href&&href.indexOf(redir)===0){clearInterval(iv);pop.close();
-            var u=new URL(href),code=u.searchParams.get('code'),err=u.searchParams.get('error');
-            if(err){cb(null,'Auth denied: '+err);return;}
-            if(code){exchangeG(clientId,code,redir,ver,cb);}
+  function isValid(){
+    return !!localStorage.getItem('gd_tok') && Date.now()<parseInt(localStorage.getItem('gd_exp')||0);
+  }
+  function saveTok(tok,exp){
+    localStorage.setItem('gd_tok',tok);
+    localStorage.setItem('gd_exp',String(Date.now()+(exp-120)*1000));
+  }
+  function clear(){
+    ['gd_tok','gd_exp'].forEach(function(k){localStorage.removeItem(k);});
+  }
+
+  // Load GIS library once, then request token
+  function loadGIS(cb){
+    if(window.google && window.google.accounts){cb();return;}
+    var s=document.createElement('script');
+    s.src='https://accounts.google.com/gsi/client';
+    s.onload=function(){cb();};
+    s.onerror=function(){cb(new Error('Failed to load Google Identity Services'));};
+    document.head.appendChild(s);
+  }
+
+  function getToken(clientId,cb){
+    // Return stored token if still valid
+    if(isValid()){cb(localStorage.getItem('gd_tok'),null);return;}
+    localStorage.setItem('gd_cid',clientId);
+    loadGIS(function(err){
+      if(err){cb(null,err.message||'Failed to load GIS');return;}
+      try{
+        var client=google.accounts.oauth2.initTokenClient({
+          client_id: clientId,
+          scope: 'https://www.googleapis.com/auth/drive.file',
+          callback: function(resp){
+            if(resp.error){cb(null,resp.error+': '+( resp.error_description||''));return;}
+            saveTok(resp.access_token, parseInt(resp.expires_in)||3600);
+            cb(resp.access_token, null);
           }
-        }catch(e){}
-      },500);
-      setTimeout(function(){clearInterval(iv);if(!pop.closed)pop.close();},300000);
+        });
+        client.requestAccessToken({prompt:'consent'});
+      }catch(e){cb(null,e.message);}
     });
   }
-  function exchangeG(cid,code,redir,ver,cb){
-    fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body:'grant_type=authorization_code&client_id='+encodeURIComponent(cid)+'&code='+encodeURIComponent(code)+'&redirect_uri='+encodeURIComponent(redir)+'&code_verifier='+encodeURIComponent(ver)})
-    .then(function(r){return r.json();}).then(function(d){
-      if(d.access_token){localStorage.setItem('gd_tok',d.access_token);localStorage.setItem('gd_exp',String(Date.now()+(parseInt(d.expires_in)||3600)*1000-60000));if(d.refresh_token)localStorage.setItem('gd_ref',d.refresh_token);cb(d.access_token,null);}
-      else cb(null,d.error_description||d.error||'Token exchange failed');
-    }).catch(function(e){cb(null,e.message);});
-  }
-  function refreshG(cb){
-    var cid=localStorage.getItem('gd_cid'),ref=localStorage.getItem('gd_ref');
-    if(!cid||!ref){cb(null,'No refresh token');return;}
-    fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=refresh_token&client_id='+encodeURIComponent(cid)+'&refresh_token='+encodeURIComponent(ref)})
-    .then(function(r){return r.json();}).then(function(d){
-      if(d.access_token){localStorage.setItem('gd_tok',d.access_token);localStorage.setItem('gd_exp',String(Date.now()+(parseInt(d.expires_in)||3600)*1000-60000));cb(d.access_token,null);}
-      else{clear();cb(null,d.error||'Refresh failed');}
-    }).catch(function(e){cb(null,e.message);});
-  }
-  function getToken(clientId,cb){
-    if(isValid()){cb(localStorage.getItem('gd_tok'),null);return;}
-    var ref=localStorage.getItem('gd_ref');
-    if(ref){refreshG(cb);return;}
-    doAuth(clientId,cb);
-  }
+
+  // Find or create a folder, then upload file
   function folder(name,tok){
-    return fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent("name='"+name.replace(/'/g,"\\'")+"' and mimeType='application/vnd.google-apps.folder' and trashed=false")+'&fields=files(id)',{headers:{Authorization:'Bearer '+tok}})
-      .then(function(r){return r.json();}).then(function(r){
+    var q="name='"+name.replace(/'/g,"\\'")+"' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+    return fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name)',
+      {headers:{Authorization:'Bearer '+tok}})
+      .then(function(r){return r.json();})
+      .then(function(r){
         if(r.files&&r.files.length)return r.files[0];
-        return fetch('https://www.googleapis.com/drive/v3/files?fields=id',{method:'POST',headers:{Authorization:'Bearer '+tok,'Content-Type':'application/json'},body:JSON.stringify({name:name,mimeType:'application/vnd.google-apps.folder'})}).then(function(r){return r.json();});
+        return fetch('https://www.googleapis.com/drive/v3/files?fields=id,name',{
+          method:'POST',
+          headers:{Authorization:'Bearer '+tok,'Content-Type':'application/json'},
+          body:JSON.stringify({name:name,mimeType:'application/vnd.google-apps.folder'})
+        }).then(function(r){return r.json();});
       });
   }
+
   function upload(tok,folderName,filename,b64,mime,existId,cb){
-    var bin=atob(b64),bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    var bin=atob(b64),bytes=new Uint8Array(bin.length);
+    for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
     function doUp(parentId){
-      var bnd='KWb';var meta=JSON.stringify(existId?{name:filename,mimeType:mime}:{name:filename,mimeType:mime,parents:parentId?[parentId]:[]});
+      var bnd='KWb';
+      var meta=JSON.stringify(existId
+        ?{name:filename,mimeType:mime}
+        :{name:filename,mimeType:mime,parents:parentId?[parentId]:[]});
       var pre=new TextEncoder().encode('--'+bnd+'\r\nContent-Type: application/json\r\n\r\n'+meta+'\r\n--'+bnd+'\r\nContent-Type: '+mime+'\r\n\r\n');
       var post=new TextEncoder().encode('\r\n--'+bnd+'--');
-      var body=new Uint8Array(pre.length+bytes.length+post.length);body.set(pre);body.set(bytes,pre.length);body.set(post,pre.length+bytes.length);
-      fetch((existId?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,name':'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name'),
-        {method:existId?'PATCH':'POST',headers:{Authorization:'Bearer '+tok,'Content-Type':'multipart/related; boundary='+bnd},body:body.buffer})
-        .then(function(r){return r.json();}).then(function(r){cb(r&&r.id?null:(r.error&&r.error.message)||'Upload failed',r&&r.id);}).catch(function(e){cb(e.message);});
+      var body=new Uint8Array(pre.length+bytes.length+post.length);
+      body.set(pre);body.set(bytes,pre.length);body.set(post,pre.length+bytes.length);
+      var url=existId
+        ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,name'
+        :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name';
+      fetch(url,{
+        method:existId?'PATCH':'POST',
+        headers:{Authorization:'Bearer '+tok,'Content-Type':'multipart/related; boundary='+bnd},
+        body:body.buffer
+      }).then(function(r){return r.json();})
+        .then(function(r){cb(r&&r.id?null:(r.error&&r.error.message)||'Upload failed',r&&r.id);})
+        .catch(function(e){cb(e.message);});
     }
     if(!folderName){doUp(null);return;}
     folder(folderName,tok).then(function(f){doUp(f?f.id:null);}).catch(function(e){cb(e.message);});
   }
+
   return{isValid:isValid,getToken:getToken,upload:upload,clear:clear};
 })();
 
@@ -763,7 +774,21 @@ function DriveSync(p){
     }catch(e){}
   },[]);
 
-  function gdSignIn(){var cid=gcid.trim();if(!cid){addLog('Enter Client ID','error');return;}localStorage.setItem('gd_cid',cid);addLog('Opening Google sign-in...','info');GDrive.getToken(cid,function(tok,err){if(err){addLog('Failed: '+err,'error');return;}setGcon(true);addLog('Google Drive connected!','success');});}
+  function gdSignIn(){
+    var cid=gcid.trim();
+    if(!cid){addLog('Enter Client ID first','error');return;}
+    localStorage.setItem('gd_cid',cid);
+    addLog('Loading Google sign-in...','info');
+    GDrive.getToken(cid,function(tok,err){
+      if(err){
+        addLog('Sign-in failed: '+err,'error');
+        addLog('Tip: Make sure you created a Web application OAuth client in Google Console','info');
+        return;
+      }
+      setGcon(true);
+      addLog('Google Drive connected!','success');
+    });
+  }
   function gdSignOut(){GDrive.clear();setGcon(false);addLog('Signed out','info');}
 
   function gdUploadOne(inv,tok,cb){
@@ -895,7 +920,22 @@ function DriveSync(p){
         Step('1','Go to Google Cloud Console',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,h('a',{href:'https://console.cloud.google.com',target:'_blank'},'console.cloud.google.com'),' \u2014 free, no billing needed'),h('div',null,'Sign in \u2192 New Project \u2192 name anything \u2192 Create'))),
         Step('2','Enable Google Drive API',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'APIs & Services \u2192 Library \u2192 search ',h('strong',null,'Google Drive API'),' \u2192 Enable'))),
         Step('3','OAuth consent screen',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'APIs & Services \u2192 OAuth consent screen \u2192 External \u2192 Create'),h('div',null,'Fill App name + your email \u2192 Save & Continue through all steps'),h('div',null,'On Test users step: Add your Gmail address'))),
-        Step('4','Create OAuth Client ID',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Credentials \u2192 Create Credentials \u2192 OAuth 2.0 Client ID \u2192 ',h('strong',null,'Web application')),h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:8}},'Authorized JavaScript origins:'),CopyBox(appUrl.split('/').slice(0,3).join('/')),h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:8}},'Authorized redirect URIs:'),CopyBox(appUrl),h('div',{style:{marginTop:8}},'Click Create \u2192 Copy the ',h('strong',null,'Client ID')))),
+        Step('4','Create OAuth Client ID',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},
+          h('div',null,'Credentials \u2192 Create Credentials \u2192 OAuth 2.0 Client ID'),
+          h('div',{style:{marginTop:8,padding:'10px 12px',background:'rgba(0,229,160,.08)',border:'1px solid rgba(0,229,160,.2)',borderRadius:6}},
+            h('strong',{style:{color:'var(--acc)',display:'block',marginBottom:4}},'\u2705 Application type: Web application'),
+            h('div',null,'(NOT Desktop app, NOT iOS, NOT Android)')
+          ),
+          h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:10}},'Authorized JavaScript origins \u2014 Add URI:'),
+          CopyBox(appUrl.split('/').slice(0,3).join('/')),
+          h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:8}},'Authorized redirect URIs \u2014 Add URI:'),
+          CopyBox(appUrl),
+          h('div',{style:{marginTop:10,padding:'10px 12px',background:'rgba(255,179,71,.08)',border:'1px solid rgba(255,179,71,.2)',borderRadius:6,fontSize:11}},
+            h('strong',{style:{color:'var(--warn)'}},'Important: '),
+            'The redirect URI must be your exact GitHub Pages URL. Open your app in the browser and copy the URL from the address bar \u2014 use that exact URL here.'
+          ),
+          h('div',{style:{marginTop:8}},'Click Create \u2192 Copy the ',h('strong',null,'Client ID'))
+        )),
         Step('5','Connect in the Google Drive tab',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Click the ',h('strong',null,'Google Drive tab'),' above \u2192 paste Client ID \u2192 Sign in'),h('div',{style:{color:'var(--acc)',marginTop:4}},'\u2705 Done! Then click Sync All.'))),
         h('div',{style:{background:'rgba(124,106,255,.07)',border:'1px solid rgba(124,106,255,.2)',borderRadius:8,padding:'12px 14px',fontSize:12,color:'var(--txt2)',lineHeight:1.9}},
           h('strong',{style:{color:'var(--acc3)',display:'block',marginBottom:4}},'\uD83D\uDCA1 Troubleshooting'),
