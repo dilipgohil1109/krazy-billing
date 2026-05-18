@@ -865,7 +865,7 @@ function InvoiceList(p){
 }
 
 function DriveSync(p){
-  var _tab=useState('guide'),activeTab=_tab[0],setActiveTab=_tab[1];
+  var _tab=useState('status'),tab=_tab[0],setTab=_tab[1];
   var _log=useState([]),log=_log[0],setLog=_log[1];
   var _busy=useState(false),busy=_busy[0],setBusy=_busy[1];
   var _prog=useState({cur:0,tot:0,lbl:''}),prog=_prog[0],setProg=_prog[1];
@@ -878,80 +878,173 @@ function DriveSync(p){
   var _of=useState(localStorage.getItem('od_folder')||'Krazy Wholesale Invoices'),of=_of[0],setOf=_of[1];
 
   var pending=p.invoices.filter(function(i){return !sids.includes(i.id);});
-  function addLog(msg,type){setLog(function(l){return [{msg:msg,type:type||'info',t:new Date().toLocaleTimeString()}].concat(l);});}
+  function addLog(msg,type){setLog(function(l){return [{msg:msg,type:type||'ok',t:new Date().toLocaleTimeString()}].concat(l);});}
   var appUrl=window.location.origin+window.location.pathname;
 
+  // Detect OAuth return (mobile redirect)
   useEffect(function(){
     var result=localStorage.getItem('oauth_result');
     if(!result)return;
     localStorage.removeItem('oauth_result');
     try{
       var r=JSON.parse(result);
-      if(r.ok&&r.provider==='google'){setGcon(true);setActiveTab('gdrive');addLog('Google Drive connected!','success');}
-      else if(r.ok&&r.provider==='onedrive'){setOcon(true);setActiveTab('onedrive');addLog('OneDrive connected!','success');}
+      if(r.ok&&r.provider==='google'){setGcon(true);setTab('status');addLog('Google Drive connected!');}
+      else if(r.ok&&r.provider==='onedrive'){setOcon(true);setTab('status');addLog('OneDrive connected!');}
       else if(r.error){addLog('Sign-in error: '+(r.desc||r.error),'error');}
     }catch(e){}
   },[]);
 
-  function gdSignIn(){var cid=gcid.trim();if(!cid){addLog('Enter Client ID','error');return;}localStorage.setItem('gd_cid',cid);addLog('Opening Google sign-in...','info');GDrive.getToken(cid,function(tok,err){if(err){addLog('Failed: '+err,'error');return;}setGcon(true);addLog('Google Drive connected!','success');});}
-  function gdSignOut(){GDrive.clear();setGcon(false);addLog('Signed out','info');}
+  function withGD(cb){
+    var cid=gcid||localStorage.getItem('gd_cid')||'';
+    if(!cid){addLog('Enter your Google Client ID in Setup tab','error');return;}
+    GDrive.getToken(cid,function(tok,err){
+      if(err||!tok){addLog('Google auth failed: '+err,'error');setGcon(false);return;}
+      setGcon(true);cb(tok);
+    });
+  }
 
-  function gdUploadOne(inv,tok,cb){
-    addLog('Rendering '+inv.number+'...','info');
-    toPDF(buildHTML(inv),function(err,b64){
-      if(err){addLog('PDF error: '+err,'error');cb(false);return;}
-      addLog('Uploading '+inv.number+'.pdf...','info');
-      GDrive.upload(tok,gf.trim()||'Krazy Wholesale Invoices',inv.number+'.pdf',b64,'application/pdf',null,function(err2,fid){
-        if(err2){addLog('Failed: '+err2,'error');cb(false);}else{addLog('\u2713 '+inv.number+'.pdf','success');cb(true,fid);}
+  // ── FETCH ALL FROM DRIVE ──
+  function fetchFromDrive(){
+    setBusy(true);setLog([]);addLog('Connecting to Google Drive...');
+    withGD(function(tok){
+      addLog('Searching for kw_data.json...');
+      GDrive.findFile(tok,'','kw_data.json',function(err,file){
+        if(err||!file){addLog('No sync data found on Drive. Push data from another device first.','error');setBusy(false);return;}
+        localStorage.setItem('gd_data_fid',file.id);
+        addLog('Found kw_data.json ('+new Date(file.modifiedTime||0).toLocaleString()+')');
+        GDrive.downloadJSON(tok,file.id,function(err2,data){
+          if(err2||!data){addLog('Download failed: '+err2,'error');setBusy(false);return;}
+          var cnt=applyDriveData(data);
+          addLog('✓ Loaded: '+cnt+' invoices, '+(data.customers||[]).length+' customers, '+(data.items||[]).length+' items');
+          addLog('--- Fetch complete. App updated. ---');
+          setBusy(false);
+        });
       });
     });
   }
 
-  function gdSyncAll(){
+  // ── PUSH ALL TO DRIVE (force push everything) ──
+  function pushAllToDrive(){
     setBusy(true);setLog([]);
-    GDrive.getToken(gcid,function(tok,err){
-      if(err){addLog('Auth: '+err,'error');setBusy(false);setGcon(false);return;}
-      setGcon(true);var ns=sids.slice(),idx=0,fn=gf.trim()||'Krazy Wholesale Invoices';
+    addLog('Pushing ALL data to Google Drive...');
+    withGD(function(tok){
+      var appData={
+        version:2, savedAt:new Date().toISOString(),
+        invoices:p.invoices, customers:p.custs,
+        items:p.items, rates:p.rates, invS:p.invS
+      };
+      var fid=localStorage.getItem('gd_data_fid')||null;
+      addLog('Uploading kw_data.json ('+p.invoices.length+' invoices)...');
+      GDrive.uploadJSON(tok,'kw_data.json',appData,fid,function(err,nfid){
+        if(err){addLog('Failed: '+err,'error');setBusy(false);return;}
+        if(nfid) localStorage.setItem('gd_data_fid',nfid);
+        addLog('✓ kw_data.json saved ('+p.invoices.length+' invoices)');
+        // Now upload Excel
+        addLog('Uploading Invoice_Master.xlsx...');
+        var fn=gf.trim()||'Krazy Wholesale Invoices';
+        GDrive.upload(tok,fn,'Invoice_Master.xlsx',buildXLSX(p.invoices),
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',gMid||null,
+          function(err2,xfid){
+            if(!err2&&xfid){setGMid(xfid);localStorage.setItem('gd_mid',xfid);addLog('✓ Invoice_Master.xlsx saved');}
+            // Upload pending PDFs
+            var pending2=p.invoices.filter(function(i){return !sids.includes(i.id);});
+            if(!pending2.length){
+              addLog('--- Push complete. All '+p.invoices.length+' invoices in Drive. ---');
+              // Mark all as synced
+              var allIds=p.invoices.map(function(i){return i.id;});
+              setSids(allIds); localStorage.setItem('synced_ids',JSON.stringify(allIds));
+              setBusy(false); return;
+            }
+            addLog('Uploading '+pending2.length+' invoice PDFs...');
+            var ns=sids.slice(), idx=0;
+            var tot=pending2.length;
+            function next(){
+              if(idx>=tot){
+                addLog('--- Push complete. All '+p.invoices.length+' invoices in Drive. ---');
+                setSids(ns); localStorage.setItem('synced_ids',JSON.stringify(ns));
+                setBusy(false); setProg({cur:0,tot:0,lbl:''});
+                return;
+              }
+              var inv=pending2[idx];
+              setProg({cur:idx+1,tot:tot,lbl:inv.number});
+              toPDF(buildHTML(inv),function(perr,b64){
+                if(!perr&&b64){
+                  GDrive.upload(tok,fn,inv.number+'.pdf',b64,'application/pdf',null,function(eu,fidu){
+                    if(!eu&&fidu){ns.push(inv.id);addLog('✓ '+inv.number+'.pdf');}
+                    else addLog('⚠ PDF failed: '+inv.number,'error');
+                    idx++;setTimeout(next,200);
+                  });
+                } else { addLog('⚠ PDF render failed: '+inv.number,'error'); idx++;setTimeout(next,100); }
+              });
+            }
+            next();
+          });
+      });
+    });
+  }
+
+  // ── SYNC CHANGED (only pending) ──
+  function syncPending(){
+    setBusy(true);setLog([]);
+    addLog('Syncing '+pending.length+' pending invoice(s)...');
+    withGD(function(tok){
+      var ns=sids.slice(), idx=0, fn=gf.trim()||'Krazy Wholesale Invoices';
+      var tot=pending.length+1;
       function next(){
         if(idx>=pending.length){
-          setProg({cur:pending.length+1,tot:pending.length+1,lbl:'Invoice_Master.xlsx'});
-          GDrive.upload(tok,fn,'Invoice_Master.xlsx',buildXLSX(p.invoices),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',gMid||null,function(err2,fid){
-            if(!err2&&fid){setGMid(fid);localStorage.setItem('gd_mid',fid);addLog('\u2713 Invoice_Master.xlsx','success');}
+          // Update kw_data.json
+          setProg({cur:tot,tot:tot,lbl:'kw_data.json'});
+          var appData={version:2,savedAt:new Date().toISOString(),invoices:p.invoices,customers:p.custs,items:p.items,rates:p.rates,invS:p.invS};
+          var fid=localStorage.getItem('gd_data_fid')||null;
+          GDrive.uploadJSON(tok,'kw_data.json',appData,fid,function(err,nfid){
+            if(!err&&nfid){localStorage.setItem('gd_data_fid',nfid);addLog('✓ kw_data.json updated');}
             setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));
-            setBusy(false);setProg({cur:0,tot:0,lbl:''});addLog('--- Complete ---','success');
-          });return;
+            setBusy(false);setProg({cur:0,tot:0,lbl:''});
+            addLog('--- Sync complete ---');
+          });
+          return;
         }
-        var inv=pending[idx];setProg({cur:idx+1,tot:pending.length+1,lbl:inv.number});
-        gdUploadOne(inv,tok,function(ok){if(ok)ns.push(inv.id);idx++;setTimeout(next,300);});
+        var inv=pending[idx];
+        setProg({cur:idx+1,tot:tot,lbl:inv.number});
+        toPDF(buildHTML(inv),function(err,b64){
+          if(!err&&b64){
+            GDrive.upload(tok,fn,inv.number+'.pdf',b64,'application/pdf',null,function(eu,fidu){
+              if(!eu){ns.push(inv.id);addLog('✓ '+inv.number+'.pdf');}
+              else addLog('⚠ '+inv.number+' failed: '+eu,'error');
+              idx++;setTimeout(next,300);
+            });
+          } else { addLog('⚠ PDF error: '+inv.number,'error'); idx++;setTimeout(next,100); }
+        });
       }
       next();
     });
   }
 
-  function odSignIn(){addLog('Opening Microsoft sign-in...','info');OneDrive.getToken(function(tok,err){if(err){addLog('Failed: '+err,'error');return;}setOcon(true);addLog('OneDrive connected!','success');});}
-  function odSignOut(){OneDrive.clear();setOcon(false);addLog('Signed out','info');}
-
+  // ── OneDrive ──
+  function odSignIn(){addLog('Opening Microsoft sign-in...');OneDrive.getToken(function(tok,err){if(err){addLog('Failed: '+err,'error');return;}setOcon(true);addLog('OneDrive connected!');});}
+  function odSignOut(){OneDrive.clear();setOcon(false);addLog('Signed out of OneDrive');}
   function odSyncAll(){
     setBusy(true);setLog([]);
     OneDrive.getToken(function(tok,err){
-      if(err){addLog('Auth: '+err,'error');setBusy(false);setOcon(false);return;}
-      setOcon(true);var ns=sids.slice(),idx=0,fn=of.trim()||'Krazy Wholesale Invoices';
+      if(err){addLog('Auth: '+err,'error');setBusy(false);return;}
+      setOcon(true);
+      var ns=sids.slice(), idx=0, fn=of.trim()||'Krazy Wholesale Invoices', tot=pending.length+1;
       function next(){
         if(idx>=pending.length){
-          setProg({cur:pending.length+1,tot:pending.length+1,lbl:'Invoice_Master.xlsx'});
+          setProg({cur:tot,tot:tot,lbl:'Invoice_Master.xlsx'});
           OneDrive.upload(tok,fn,'Invoice_Master.xlsx',buildXLSX(p.invoices),function(err2){
-            if(!err2)addLog('\u2713 Invoice_Master.xlsx','success');
+            if(!err2)addLog('✓ Invoice_Master.xlsx');
             setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));
-            setBusy(false);setProg({cur:0,tot:0,lbl:''});addLog('--- Complete ---','success');
-          });return;
+            setBusy(false);setProg({cur:0,tot:0,lbl:''});addLog('--- OneDrive sync complete ---');
+          });
+          return;
         }
-        var inv=pending[idx];setProg({cur:idx+1,tot:pending.length+1,lbl:inv.number});
-        addLog('Rendering '+inv.number+'...','info');
+        var inv=pending[idx];setProg({cur:idx+1,tot:tot,lbl:inv.number});
         toPDF(buildHTML(inv),function(err2,b64){
-          if(err2){addLog('Error: '+err2,'error');idx++;setTimeout(next,100);return;}
+          if(err2){addLog('⚠ PDF error: '+inv.number,'error');idx++;setTimeout(next,100);return;}
           OneDrive.upload(tok,fn,inv.number+'.pdf',b64,function(err3){
-            if(!err3){ns.push(inv.id);addLog('\u2713 '+inv.number+'.pdf','success');}
-            else addLog('Failed: '+err3,'error');
+            if(!err3){ns.push(inv.id);addLog('✓ '+inv.number+'.pdf');}
+            else addLog('⚠ Failed: '+inv.number,'error');
             idx++;setTimeout(next,300);
           });
         });
@@ -960,157 +1053,268 @@ function DriveSync(p){
     });
   }
 
-  var TABS=[{id:'guide',lbl:'\uD83D\uDCD6 Setup Guide'},{id:'gdrive',lbl:'\uD83D\uDCBE Google Drive'},{id:'onedrive',lbl:'\u2601\uFE0F OneDrive'},{id:'download',lbl:'\u2B07\uFE0F Download'}];
+  // ── GOOGLE SIGN IN/OUT ──
+  function gdSignIn(){
+    var cid=gcid.trim();if(!cid){addLog('Enter Client ID','error');return;}
+    localStorage.setItem('gd_cid',cid);setGcid(cid);
+    addLog('Opening Google sign-in...');
+    GDrive.getToken(cid,function(tok,err){
+      if(err){addLog('Sign-in failed: '+err,'error');return;}
+      setGcon(true);addLog('Google Drive connected!');
+      // Immediately fetch after connecting
+      fetchFromDrive();
+    });
+  }
+  function gdSignOut(){GDrive.clear();setGcon(false);addLog('Signed out of Google Drive');}
 
-  function Step(n,title,children){
-    return h('div',{style:{display:'flex',gap:14,marginBottom:20}},
-      h('div',{style:{width:28,height:28,borderRadius:'50%',background:'var(--acc)',color:'#0d0f12',fontWeight:800,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,marginTop:2}},n),
-      h('div',{style:{flex:1}},h('div',{style:{fontWeight:700,fontSize:13,color:'var(--txt)',marginBottom:6}},title),children)
+  var TABS=[
+    {id:'status',lbl:'📊 Status'},
+    {id:'gdrive',lbl:'💾 Google Drive'},
+    {id:'onedrive',lbl:'☁️ OneDrive'},
+    {id:'guide',lbl:'📖 Setup Guide'}
+  ];
+
+  function ProgBar(){
+    if(!prog.tot)return null;
+    return h('div',{style:{marginBottom:12}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:11,color:'var(--txt2)',marginBottom:4}},
+        h('span',null,prog.lbl),h('span',null,prog.cur+'/'+prog.tot)),
+      h('div',{className:'prog-bar'},h('div',{className:'prog-fill',style:{width:(prog.cur/prog.tot*100)+'%'}}))
     );
   }
-  function CopyBox(text){
-    return h('div',{style:{display:'flex',alignItems:'center',gap:8,background:'var(--bg)',border:'1px solid var(--brd)',borderRadius:6,padding:'7px 12px',margin:'5px 0'}},
-      h('code',{style:{flex:1,fontSize:11,color:'var(--acc)',wordBreak:'break-all'}},text),
-      h('button',{onClick:function(){navigator.clipboard&&navigator.clipboard.writeText(text);},style:{background:'none',border:'1px solid var(--brd)',borderRadius:4,color:'var(--txt2)',cursor:'pointer',padding:'2px 8px',fontSize:10,flexShrink:0}},'\uD83D\uDCCB')
+  function LogBox(){
+    if(!log.length)return null;
+    return h('div',{className:'card',style:{marginTop:14}},
+      h('div',{className:'card-header'},
+        h('h3',null,'Activity Log'),
+        h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setLog([]);}},'Clear')
+      ),
+      h('div',{className:'log-box'},
+        log.map(function(e,i){
+          return h('div',{key:i,className:'log-line',style:{color:e.type==='error'?'var(--danger)':'var(--acc)'}},
+            h('span',{style:{color:'var(--txt3)',flexShrink:0}},e.t),h('span',null,e.msg));
+        })
+      )
     );
-  }
-
-  function InvoiceTable(synced,onUpload){
-    return p.invoices.length===0?h('div',{className:'empty'},h('p',null,'No invoices yet')):
-    h('div',{className:'tbl-wrap'},h('table',null,
-      h('thead',null,h('tr',null,h('th',null,'#'),h('th',null,'Customer'),h('th',null,'Total'),h('th',null,'Status'),h('th',null,''))),
-      h('tbody',null,p.invoices.slice().reverse().map(function(inv){
-        var saved=sids.includes(inv.id);
-        return h('tr',{key:inv.id},
-          h('td',null,h('span',{style:{color:'var(--acc)',fontWeight:700}},inv.number)),
-          h('td',null,inv.customerName),h('td',null,fmt(inv.grandTotal)),
-          h('td',null,saved?h('span',{className:'badge b-ok'},'\u2713 Saved'):h('span',{className:'badge b-warn'},'Pending')),
-          h('td',null,!saved&&onUpload&&h('button',{className:'btn btn-sm btn-secondary',disabled:busy,onClick:function(){onUpload(inv);}},'\u2191 Upload'))
-        );
-      }))
-    ));
   }
 
   return h('div',null,
-    h('div',{className:'page-hdr'},h('h2',null,'\u2601\uFE0F Cloud Sync'),h('p',null,'Save invoices to Google Drive or OneDrive \u2014 free')),
-    h('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:14,padding:'10px 14px',background:'var(--surf)',border:'1px solid var(--brd)',borderRadius:8,flexWrap:'wrap'}},
-      h('span',{style:{fontSize:12,color:'var(--txt2)'}},p.invoices.length+' invoices'),
-      h('span',{style:{color:'var(--txt3)'}},'|'),
-      pending.length>0?h('span',{style:{fontSize:12,color:'var(--warn)'}},pending.length+' pending'):h('span',{style:{fontSize:12,color:'var(--acc)'}},(p.invoices.length?'\u2713 All synced':'No invoices')),
-      h('span',{style:{color:'var(--txt3)'}},'|'),
-      gcon?h('span',{style:{fontSize:12,color:'var(--acc)'}},'Google Drive \u25CF'):h('span',{style:{fontSize:12,color:'var(--txt3)'}},'Google Drive \u25CB'),
-      h('span',{style:{color:'var(--txt3)'}},'|'),
-      ocon?h('span',{style:{fontSize:12,color:'var(--acc3)'}},'OneDrive \u25CF'):h('span',{style:{fontSize:12,color:'var(--txt3)'}},'OneDrive \u25CB'),
-      h('div',{style:{flex:1}}),
-      h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setSids([]);localStorage.removeItem('synced_ids');addLog('Reset','info');}},'\u21BA Reset')
+    h('div',{className:'page-hdr'},
+      h('h2',null,'☁️ Cloud Sync'),
+      h('p',null,'Drive is the source of truth. Fetch on open. Push on every change.')
     ),
-    h('div',{className:'tabs'},TABS.map(function(t){return h('button',{key:t.id,className:'tbtn'+(activeTab===t.id?' active':''),onClick:function(){setActiveTab(t.id);}},t.lbl);})),
 
-    activeTab==='guide'&&h('div',null,
-      h('div',{className:'card',style:{marginBottom:14}},
-        h('div',{style:{display:'flex',alignItems:'center',gap:12,marginBottom:18}},
-          h('div',{style:{fontSize:28}},'\uD83D\uDC19'),
-          h('div',null,h('div',{style:{fontWeight:800,fontSize:16}},'Part A \u2014 Host on GitHub Pages'),h('div',{style:{fontSize:12,color:'var(--txt2)'}},'Free hosting \u2014 yourname.github.io \u2014 5 minutes'))
-        ),
-        Step('1','Create a free GitHub account',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Go to ',h('a',{href:'https://github.com',target:'_blank'},'github.com'),' \u2192 Sign up \u2014 completely free'),h('div',null,'Your app will live at:'),CopyBox('https://YOUR-USERNAME.github.io/krazy-billing/'))),
-        Step('2','Create a new repository',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Click ',h('strong',null,'+ New'),', name it:'),CopyBox('krazy-billing'),h('div',null,'Set to ',h('strong',null,'Public'),', tick ',h('strong',null,'Add a README'),', click ',h('strong',null,'Create')))),
-        Step('3','Upload & rename the file',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Click ',h('strong',null,'Add file \u2192 Upload files'),', drag in your ',h('code',null,'billing-app.html')),h('div',null,'After upload, click the filename \u2192 pencil icon \u2192 rename to ',h('code',null,'index.html')),h('div',null,'Click ',h('strong',null,'Commit changes')))),
-        Step('4','Enable GitHub Pages',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Settings \u2192 Pages (sidebar) \u2192 Source: ',h('strong',null,'Deploy from branch')),h('div',null,'Branch: ',h('strong',null,'main'),' \u2192 folder: ',h('strong',null,'/ (root)'),'\u2192 Save'),h('div',{style:{color:'var(--acc)',marginTop:6}},'\u2705 Wait 2 minutes. Your app is live!'))),
-        h('div',{style:{background:'rgba(0,229,160,.07)',border:'1px solid rgba(0,229,160,.2)',borderRadius:8,padding:'12px 14px',fontSize:12,color:'var(--txt2)'}},h('strong',{style:{color:'var(--acc)'}},'Done! '),h('span',null,'Write down your GitHub Pages URL \u2014 you need it for Part B.'))
+    // Status bar
+    h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:10,marginBottom:14}},
+      h('div',{style:{background:'var(--surf)',border:'1px solid var(--brd)',borderRadius:8,padding:'10px 12px',textAlign:'center'}},
+        h('div',{style:{fontSize:18,fontWeight:800,color:'var(--acc)'}},p.invoices.length),
+        h('div',{style:{fontSize:10,color:'var(--txt2)',textTransform:'uppercase',marginTop:2}},'Total Invoices')
       ),
-
-      h('div',{className:'card',style:{marginBottom:14}},
-        h('div',{style:{display:'flex',alignItems:'center',gap:12,marginBottom:18}},h('div',{style:{fontSize:28}},'\uD83D\uDCBE'),h('div',null,h('div',{style:{fontWeight:800,fontSize:16}},'Part B \u2014 Google Drive'),h('div',{style:{fontSize:12,color:'var(--txt2)'}},'One-time 5-minute setup \u2014 then one-click sync forever'))),
-        h('div',{style:{background:'rgba(255,179,71,.08)',border:'1px solid rgba(255,179,71,.2)',borderRadius:7,padding:'10px 14px',marginBottom:14,fontSize:12,color:'var(--txt2)'}},'Complete Part A first. Google OAuth requires a fixed URL \u2014 your GitHub Pages URL.'),
-        Step('1','Go to Google Cloud Console',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,h('a',{href:'https://console.cloud.google.com',target:'_blank'},'console.cloud.google.com'),' \u2014 free, no billing needed'),h('div',null,'Sign in \u2192 New Project \u2192 name anything \u2192 Create'))),
-        Step('2','Enable Google Drive API',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'APIs & Services \u2192 Library \u2192 search ',h('strong',null,'Google Drive API'),' \u2192 Enable'))),
-        Step('3','OAuth consent screen',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'APIs & Services \u2192 OAuth consent screen \u2192 External \u2192 Create'),h('div',null,'Fill App name + your email \u2192 Save & Continue through all steps'),h('div',null,'On Test users step: Add your Gmail address'))),
-        Step('4','Create OAuth Client ID',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Credentials \u2192 Create Credentials \u2192 OAuth 2.0 Client ID \u2192 ',h('strong',null,'Web application')),h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:8}},'Authorized JavaScript origins:'),CopyBox(appUrl.split('/').slice(0,3).join('/')),h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:8}},'Authorized redirect URIs:'),CopyBox(appUrl),h('div',{style:{marginTop:8}},'Click Create \u2192 Copy the ',h('strong',null,'Client ID')))),
-        Step('5','Connect in the Google Drive tab',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Click the ',h('strong',null,'Google Drive tab'),' above \u2192 paste Client ID \u2192 Sign in'),h('div',{style:{color:'var(--acc)',marginTop:4}},'\u2705 Done! Then click Sync All.'))),
-        h('div',{style:{background:'rgba(124,106,255,.07)',border:'1px solid rgba(124,106,255,.2)',borderRadius:8,padding:'12px 14px',fontSize:12,color:'var(--txt2)',lineHeight:1.9}},
-          h('strong',{style:{color:'var(--acc3)',display:'block',marginBottom:4}},'\uD83D\uDCA1 Troubleshooting'),
-          h('div',null,h('strong',null,'OAuth client not found:'),' Client ID wrong or the OAuth client type must be Web application (not Desktop app)'),
-          h('div',null,h('strong',null,'redirect_uri_mismatch:'),' The URI in Google Console must exactly match your GitHub Pages URL including trailing /'),
-          h('div',null,h('strong',null,'Access blocked:'),' Add your Gmail as a Test User in Step 3'),
-          h('div',null,h('strong',null,'Popup blocked:'),' Allow popups for your GitHub Pages URL in browser settings. On mobile the page will redirect instead of popup \u2014 that is normal.')
-        )
+      h('div',{style:{background:'var(--surf)',border:'1px solid var(--brd)',borderRadius:8,padding:'10px 12px',textAlign:'center'}},
+        h('div',{style:{fontSize:18,fontWeight:800,color:pending.length?'var(--warn)':'var(--acc)'}},pending.length),
+        h('div',{style:{fontSize:10,color:'var(--txt2)',textTransform:'uppercase',marginTop:2}},'Not in Drive')
       ),
-
-      h('div',{className:'card'},
-        h('div',{style:{display:'flex',alignItems:'center',gap:12,marginBottom:14}},h('div',{style:{fontSize:28}},'\u2601\uFE0F'),h('div',null,h('div',{style:{fontWeight:800,fontSize:16}},'Part C \u2014 OneDrive (Easier Option)'),h('div',{style:{fontSize:12,color:'var(--txt2)'}},'Zero setup \u2014 just sign in with Microsoft'))),
-        h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:2.1}},
-          h('div',null,'\u2705 No Client ID, no Cloud Console, no configuration'),
-          h('div',null,'\u2705 Works with Outlook, Hotmail, Microsoft 365, Xbox accounts'),
-          h('div',null,'\u2705 Free 5 GB OneDrive storage'),
-          h('div',null,'\u2705 Works on GitHub Pages without extra setup'),
-          h('div',{style:{marginTop:10,fontWeight:600,color:'var(--txt)'}},'Just click the OneDrive tab above and sign in.')
-        )
+      h('div',{style:{background:gcon?'rgba(0,229,160,.1)':'var(--surf)',border:'1px solid '+(gcon?'rgba(0,229,160,.3)':'var(--brd)'),borderRadius:8,padding:'10px 12px',textAlign:'center'}},
+        h('div',{style:{fontSize:13,fontWeight:700,color:gcon?'var(--acc)':'var(--txt3)'}},gcon?'● On':'○ Off'),
+        h('div',{style:{fontSize:10,color:'var(--txt2)',textTransform:'uppercase',marginTop:2}},'Google Drive')
+      ),
+      h('div',{style:{background:ocon?'rgba(124,106,255,.1)':'var(--surf)',border:'1px solid '+(ocon?'rgba(124,106,255,.3)':'var(--brd)'),borderRadius:8,padding:'10px 12px',textAlign:'center'}},
+        h('div',{style:{fontSize:13,fontWeight:700,color:ocon?'var(--acc3)':'var(--txt3)'}},ocon?'● On':'○ Off'),
+        h('div',{style:{fontSize:10,color:'var(--txt2)',textTransform:'uppercase',marginTop:2}},'OneDrive')
       )
     ),
 
-    activeTab==='gdrive'&&h('div',null,
+    // Tabs
+    h('div',{className:'tabs'},TABS.map(function(t){return h('button',{key:t.id,className:'tbtn'+(tab===t.id?' active':''),onClick:function(){setTab(t.id);}},t.lbl);})),
+
+    // ════ STATUS TAB ════
+    tab==='status'&&h('div',null,
+      // Main action buttons
       h('div',{className:'card',style:{marginBottom:14}},
-        h('div',{className:'card-header'},h('h3',null,'\uD83D\uDCBE Google Drive'),gcon?h('span',{className:'badge b-ok'},'\u25CF Connected'):h('span',{className:'badge b-warn'},'Not connected')),
-        !gcon&&h('div',null,
-          h('div',{style:{fontSize:12,color:'var(--txt2)',marginBottom:12,lineHeight:1.8}},'Follow the Setup Guide tab first, then paste your Client ID here.'),
-          h('div',{style:{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}},
-            h('div',{className:'fg',style:{flex:1,minWidth:240}},h('label',null,'Google OAuth Client ID'),h('input',{value:gcid,onChange:function(e){setGcid(e.target.value);},placeholder:'xxxxxxxx.apps.googleusercontent.com',style:{fontSize:11}})),
-            h('button',{className:'btn btn-primary',disabled:!gcid.trim(),onClick:gdSignIn},'\uD83D\uDCBE Sign in with Google')
+        h('div',{className:'card-header'},h('h3',null,'Drive Actions')),
+        h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}},
+          // FETCH
+          h('div',{style:{background:'rgba(0,229,160,.06)',border:'1px solid rgba(0,229,160,.2)',borderRadius:10,padding:'16px 14px'}},
+            h('div',{style:{fontWeight:700,fontSize:14,color:'var(--acc)',marginBottom:6}},'↓ Fetch from Drive'),
+            h('div',{style:{fontSize:11,color:'var(--txt2)',marginBottom:12,lineHeight:1.7}},'Download the latest data from Drive. Use this when you open on a new device or after another device has saved changes.'),
+            h('button',{className:'btn btn-primary',disabled:busy||!gcon,onClick:fetchFromDrive,style:{width:'100%'}},
+              busy?'⏳ Fetching...':'↓ Fetch Latest from Drive')
           ),
-          h('div',{style:{marginTop:10,fontSize:11,color:'var(--txt3)'}},'Your app URL for Google Console: ',h('code',null,appUrl))
+          // PUSH ALL
+          h('div',{style:{background:'rgba(255,107,53,.06)',border:'1px solid rgba(255,107,53,.2)',borderRadius:10,padding:'16px 14px'}},
+            h('div',{style:{fontWeight:700,fontSize:14,color:'var(--acc2)',marginBottom:6}},'↑ Push All to Drive'),
+            h('div',{style:{fontSize:11,color:'var(--txt2)',marginBottom:12,lineHeight:1.7}},'Force-upload ALL '+p.invoices.length+' invoices + all data to Drive. Use this when Drive is out of date or after data was lost.'),
+            h('button',{className:'btn btn-secondary',disabled:busy||!gcon,onClick:pushAllToDrive,style:{width:'100%',borderColor:'var(--acc2)',color:'var(--acc2)'}},
+              busy?'⏳ Pushing...':'↑ Push All to Drive ('+p.invoices.length+')')
+          )
+        ),
+        // Sync pending
+        pending.length>0&&h('div',{style:{background:'rgba(255,179,71,.06)',border:'1px solid rgba(255,179,71,.2)',borderRadius:8,padding:'12px 14px',marginBottom:10}},
+          h('div',{className:'fr',style:{justifyContent:'space-between'}},
+            h('div',null,
+              h('div',{style:{fontWeight:600,fontSize:13,color:'var(--warn)'}},pending.length+' invoice(s) not yet in Drive'),
+              h('div',{style:{fontSize:11,color:'var(--txt2)',marginTop:3}},'These were created/edited since last sync')
+            ),
+            h('button',{className:'btn btn-primary',disabled:busy||!gcon,onClick:syncPending},busy?'⏳ Syncing...':'↑ Sync '+pending.length+' Pending')
+          )
+        ),
+        h(ProgBar,null),
+        // Download locally
+        h('div',{style:{display:'flex',gap:10,flexWrap:'wrap',paddingTop:10,borderTop:'1px solid var(--brd)'}},
+          h('button',{className:'btn btn-secondary',disabled:busy||!p.invoices.length,onClick:function(){
+            setBusy(true);
+            dlFile(buildXLSX(p.invoices),'Invoice_Master.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            addLog('✓ Downloaded Invoice_Master.xlsx');
+            setBusy(false);
+          }},'⬇️ Download Excel'),
+          h('button',{className:'btn btn-secondary',disabled:busy,onClick:function(){setSids([]);localStorage.removeItem('synced_ids');addLog('Sync status reset');}},'Reset Sync Status')
+        )
+      ),
+
+      // Invoice table
+      h('div',{className:'card'},
+        h('div',{className:'card-header'},h('h3',null,'All Invoices ('+p.invoices.length+')')),
+        p.invoices.length===0?h('div',{className:'empty'},h('p',null,'No invoices yet')):
+        h('div',{className:'tbl-wrap'},h('table',null,
+          h('thead',null,h('tr',null,h('th',null,'#'),h('th',null,'Date'),h('th',null,'Customer'),h('th',null,'Total'),h('th',null,'Drive Status'),h('th',null,''))),
+          h('tbody',null,p.invoices.slice().reverse().map(function(inv){
+            var saved=sids.includes(inv.id);
+            return h('tr',{key:inv.id},
+              h('td',null,h('span',{style:{color:'var(--acc)',fontWeight:700}},inv.number)),
+              h('td',{style:{color:'var(--txt2)'}},inv.date),
+              h('td',null,inv.customerName),
+              h('td',null,fmt(inv.grandTotal)),
+              h('td',null,saved
+                ?h('span',{className:'badge b-ok'},'✓ In Drive')
+                :h('span',{className:'badge b-warn'},'Pending')
+              ),
+              h('td',null,h('div',{className:'fr'},
+                h('button',{className:'btn btn-sm btn-secondary',disabled:busy||!gcon,onClick:function(){
+                  setBusy(true);
+                  withGD(function(tok){
+                    toPDF(buildHTML(inv),function(err,b64){
+                      if(err){addLog('PDF error: '+err,'error');setBusy(false);return;}
+                      GDrive.upload(tok,gf.trim()||'Krazy Wholesale Invoices',inv.number+'.pdf',b64,'application/pdf',null,function(eu){
+                        if(!eu){var ns=sids.includes(inv.id)?sids:sids.concat([inv.id]);setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));addLog('✓ '+inv.number+'.pdf uploaded');}
+                        else addLog('Failed: '+eu,'error');
+                        setBusy(false);
+                      });
+                    });
+                  });
+                }},'↑ PDF'),
+                h('button',{className:'btn btn-sm btn-secondary',onClick:function(){
+                  toPDF(buildHTML(inv),function(err,b64){if(!err)dlFile(b64,inv.number+'.pdf','application/pdf');});
+                }},'⬇ DL')
+              ))
+            );
+          }))
+        ))
+      ),
+      h(LogBox,null)
+    ),
+
+    // ════ GOOGLE DRIVE TAB ════
+    tab==='gdrive'&&h('div',null,
+      h('div',{className:'card',style:{marginBottom:14}},
+        h('div',{className:'card-header'},
+          h('h3',null,'💾 Google Drive'),
+          gcon?h('span',{className:'badge b-ok'},'● Connected'):h('span',{className:'badge b-warn'},'Not connected')
+        ),
+        !gcon&&h('div',null,
+          h('div',{style:{background:'rgba(0,229,160,.06)',border:'1px solid rgba(0,229,160,.2)',borderRadius:8,padding:'12px 14px',marginBottom:14,fontSize:12,color:'var(--txt2)',lineHeight:1.8}},
+            h('strong',{style:{color:'var(--acc)',display:'block',marginBottom:4}},'📋 Setup — 5 minutes, free:'),
+            h('ol',{style:{paddingLeft:18,lineHeight:2.2}},
+              h('li',null,h('a',{href:'https://console.cloud.google.com',target:'_blank'},'console.cloud.google.com'),' → New Project (free)'),
+              h('li',null,'APIs & Services → Library → Enable ',h('strong',null,'Google Drive API')),
+              h('li',null,'OAuth consent screen → External → add your Gmail as test user'),
+              h('li',null,'Credentials → OAuth 2.0 Client ID → ',h('strong',null,'Web application')),
+              h('li',null,'Authorized JavaScript origins:'),
+              h('div',{style:{background:'var(--bg)',border:'1px solid var(--brd)',borderRadius:5,padding:'5px 10px',margin:'2px 0 6px 0',fontSize:11,color:'var(--acc3)',fontFamily:'monospace'}},appUrl.split('/').slice(0,3).join('/')),
+              h('li',null,'Copy the Client ID → paste below')
+            )
+          ),
+          h('div',{style:{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap',marginBottom:10}},
+            h('div',{className:'fg',style:{flex:1,minWidth:240}},
+              h('label',null,'Google OAuth Client ID'),
+              h('input',{value:gcid,onChange:function(e){setGcid(e.target.value);},placeholder:'xxxx.apps.googleusercontent.com',style:{fontSize:11}})
+            ),
+            h('button',{className:'btn btn-primary',disabled:!gcid.trim()||busy,onClick:gdSignIn},'💾 Sign in with Google')
+          ),
+          h('div',{style:{fontSize:11,color:'var(--txt3)'}},'App URL: ',h('code',null,appUrl))
         ),
         gcon&&h('div',null,
-          h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:12}},h('span',{style:{fontSize:12,color:'var(--acc)',fontWeight:600}},'\u25CF Signed in'),h('button',{className:'btn btn-sm btn-danger',onClick:gdSignOut},'Sign out')),
-          h('div',{className:'fg',style:{maxWidth:320}},h('label',null,'Drive folder'),h('input',{value:gf,onChange:function(e){setGf(e.target.value);localStorage.setItem('gd_folder',e.target.value);}}))
+          h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:12}},
+            h('span',{style:{fontSize:12,color:'var(--acc)',fontWeight:600}},'● Connected to Google Drive'),
+            h('button',{className:'btn btn-sm btn-danger',onClick:gdSignOut},'Sign out')
+          ),
+          h('div',{className:'fg',style:{maxWidth:320}},
+            h('label',null,'Drive folder name'),
+            h('input',{value:gf,onChange:function(e){setGf(e.target.value);localStorage.setItem('gd_folder',e.target.value);}})
+          ),
+          h('div',{className:'fr',style:{marginTop:12}},
+            h('button',{className:'btn btn-primary',disabled:busy,onClick:fetchFromDrive},'↓ Fetch from Drive'),
+            h('button',{className:'btn btn-secondary',disabled:busy,onClick:pushAllToDrive},'↑ Push All to Drive')
+          )
         )
       ),
-      gcon&&h('div',{className:'card'},
-        h('div',{className:'card-header'},h('h3',null,'Sync'),h('div',{className:'fr'},pending.length>0&&h('span',{className:'badge b-warn'},pending.length+' pending'),pending.length===0&&p.invoices.length>0&&h('span',{className:'badge b-ok'},'\u2713 All synced'))),
-        prog.tot>0&&h('div',{style:{marginBottom:12}},h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:11,color:'var(--txt2)',marginBottom:4}},h('span',null,prog.lbl),h('span',null,prog.cur+'/'+prog.tot)),h('div',{className:'prog-bar'},h('div',{className:'prog-fill',style:{width:(prog.tot?prog.cur/prog.tot*100:0)+'%'}}))),
-        h('div',{className:'fr',style:{marginBottom:14}},h('button',{className:'btn btn-primary',disabled:busy||!pending.length,onClick:gdSyncAll},busy?'\u23F3 Syncing...':'\uD83D\uDCBE Sync All ('+pending.length+' pending)'),h('button',{className:'btn btn-secondary',disabled:busy,onClick:function(){dlFile(buildXLSX(p.invoices),'Invoice_Master.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');}},'\uD83D\uDCCA Excel')),
-        InvoiceTable(true,function(inv){setBusy(true);GDrive.getToken(gcid,function(tok,err){if(err){addLog('Auth: '+err,'error');setBusy(false);return;}gdUploadOne(inv,tok,function(ok){if(ok){var ns=sids.includes(inv.id)?sids:sids.concat([inv.id]);setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));}setBusy(false);});});})
-      )
+      h(LogBox,null)
     ),
 
-    activeTab==='onedrive'&&h('div',null,
+    // ════ ONEDRIVE TAB ════
+    tab==='onedrive'&&h('div',null,
       h('div',{className:'card',style:{marginBottom:14}},
-        h('div',{className:'card-header'},h('h3',null,'\u2601\uFE0F OneDrive'),ocon?h('span',{className:'badge b-ok'},'\u25CF Connected'):h('span',{className:'badge b-warn'},'Not connected')),
+        h('div',{className:'card-header'},
+          h('h3',null,'☁️ OneDrive'),
+          ocon?h('span',{className:'badge b-ok'},'● Connected'):h('span',{className:'badge b-warn'},'Not connected')
+        ),
         !ocon&&h('div',null,
-          h('div',{style:{background:'rgba(124,106,255,.07)',border:'1px solid rgba(124,106,255,.2)',borderRadius:8,padding:'12px 14px',marginBottom:14,fontSize:12,color:'var(--txt2)',lineHeight:1.8}},h('strong',{style:{color:'var(--acc3)',display:'block',marginBottom:4}},'\u2705 Zero setup'),h('p',null,'Sign in with any Microsoft / Outlook / Hotmail account. Free 5 GB storage.')),
-          h('button',{className:'btn btn-purple',onClick:odSignIn},'\u2601\uFE0F Sign in with Microsoft')
+          h('div',{style:{background:'rgba(124,106,255,.06)',border:'1px solid rgba(124,106,255,.2)',borderRadius:8,padding:'12px 14px',marginBottom:14,fontSize:12,color:'var(--txt2)',lineHeight:1.8}},
+            h('strong',{style:{color:'var(--acc3)'}},'Zero setup — '),
+            'Just sign in with your Microsoft / Outlook / Hotmail account. Free 5 GB storage.'
+          ),
+          h('button',{className:'btn btn-purple',onClick:odSignIn,disabled:busy},'☁️ Sign in with Microsoft (Free)')
         ),
         ocon&&h('div',null,
-          h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:12}},h('span',{style:{fontSize:12,color:'var(--acc)',fontWeight:600}},'\u25CF Signed in to OneDrive'),h('button',{className:'btn btn-sm btn-danger',onClick:odSignOut},'Sign out')),
-          h('div',{className:'fg',style:{maxWidth:320}},h('label',null,'OneDrive folder'),h('input',{value:of,onChange:function(e){setOf(e.target.value);localStorage.setItem('od_folder',e.target.value);}}))
+          h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:12}},
+            h('span',{style:{fontSize:12,color:'var(--acc)',fontWeight:600}},'● Connected to OneDrive'),
+            h('button',{className:'btn btn-sm btn-danger',onClick:odSignOut},'Sign out')
+          ),
+          h('div',{className:'fg',style:{maxWidth:320,marginBottom:12}},h('label',null,'OneDrive folder'),h('input',{value:of,onChange:function(e){setOf(e.target.value);localStorage.setItem('od_folder',e.target.value);}})),
+          h('button',{className:'btn btn-purple',disabled:busy||!pending.length,onClick:odSyncAll},busy?'⏳ Syncing...':'☁️ Sync '+pending.length+' Pending to OneDrive')
         )
       ),
-      ocon&&h('div',{className:'card'},
-        h('div',{className:'card-header'},h('h3',null,'Sync'),h('div',{className:'fr'},pending.length>0&&h('span',{className:'badge b-warn'},pending.length+' pending'),pending.length===0&&p.invoices.length>0&&h('span',{className:'badge b-ok'},'\u2713 All synced'))),
-        prog.tot>0&&h('div',{style:{marginBottom:12}},h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:11,color:'var(--txt2)',marginBottom:4}},h('span',null,prog.lbl),h('span',null,prog.cur+'/'+prog.tot)),h('div',{className:'prog-bar'},h('div',{className:'prog-fill',style:{width:(prog.tot?prog.cur/prog.tot*100:0)+'%'}}))),
-        h('div',{className:'fr',style:{marginBottom:14}},h('button',{className:'btn btn-purple',disabled:busy||!pending.length,onClick:odSyncAll},busy?'\u23F3 Syncing...':'\u2601\uFE0F Sync All ('+pending.length+' pending)')),
-        InvoiceTable(true,function(inv){setBusy(true);OneDrive.getToken(function(tok,err){if(err){addLog('Auth: '+err,'error');setBusy(false);return;}setOcon(true);toPDF(buildHTML(inv),function(err2,b64){if(err2){addLog('PDF: '+err2,'error');setBusy(false);return;}OneDrive.upload(tok,of.trim()||'Krazy Wholesale Invoices',inv.number+'.pdf',b64,function(err3){if(!err3){var ns=sids.includes(inv.id)?sids:sids.concat([inv.id]);setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));addLog('\u2713 '+inv.number+'.pdf','success');}else addLog('Failed: '+err3,'error');setBusy(false);});});});})
-      )
+      h(LogBox,null)
     ),
 
-    activeTab==='download'&&h('div',null,
+    // ════ GUIDE TAB ════
+    tab==='guide'&&h('div',null,
       h('div',{className:'card',style:{marginBottom:14}},
-        h('div',{className:'card-header'},h('h3',null,'\u2B07\uFE0F Download Locally')),
-        h('p',{style:{fontSize:12,color:'var(--txt2)',marginBottom:14,lineHeight:1.8}},'Download all PDFs and Invoice_Master.xlsx to your device. Then manually upload to any cloud storage.'),
-        h('div',{className:'fr',style:{flexWrap:'wrap'}},
-          h('button',{className:'btn btn-primary',disabled:busy||!p.invoices.length,onClick:function(){
-            setBusy(true);dlFile(buildXLSX(p.invoices),'Invoice_Master.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');addLog('Downloaded Invoice_Master.xlsx','success');
-            var pend=p.invoices.filter(function(i){return !sids.includes(i.id);}),idx=0;
-            function next(){if(idx>=pend.length){setBusy(false);addLog('Done!','success');return;}var inv=pend[idx];toPDF(buildHTML(inv),function(err,b64){if(!err){dlFile(b64,inv.number+'.pdf','application/pdf');addLog('Downloaded: '+inv.number+'.pdf','success');}idx++;setTimeout(next,600);});}
-            next();
-          }},busy?'\u23F3 Generating...':'\u2B07\uFE0F Download All ('+pending.length+' pending + Excel)')
+        h('div',{style:{fontWeight:700,fontSize:16,marginBottom:16}},'How Sync Works'),
+        h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:2.1}},
+          h('div',{style:{display:'grid',gridTemplateColumns:'auto 1fr',gap:'6px 14px',alignItems:'start'}},
+            h('span',{style:{color:'var(--acc)',fontWeight:700}},'On app open:'),
+            h('span',null,'Automatically fetches kw_data.json from Drive and merges with local data. Drive wins on conflicts.'),
+            h('span',{style:{color:'var(--acc)',fontWeight:700}},'On every change:'),
+            h('span',null,'Customers, items, invoices, settings — all changes auto-push to Drive after 2 seconds.'),
+            h('span',{style:{color:'var(--acc)',fontWeight:700}},'New invoice:'),
+            h('span',null,'PDF uploaded to Drive folder immediately. kw_data.json updated.'),
+            h('span',{style:{color:'var(--acc)',fontWeight:700}},'Fetch from Drive:'),
+            h('span',null,'Pull latest data manually. Use when another device has newer data.'),
+            h('span',{style:{color:'var(--acc)',fontWeight:700}},'Push All to Drive:'),
+            h('span',null,'Force-upload everything. Use after data loss or when Drive is stale.')
+          )
         )
       ),
-      InvoiceTable(false,null)
-    ),
-
-    log.length>0&&h('div',{className:'card',style:{marginTop:14}},
-      h('div',{className:'card-header'},h('h3',null,'Log'),h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setLog([]);}},'Clear')),
-      h('div',{className:'log-box'},log.map(function(e,i){return h('div',{key:i,className:'log-line',style:{color:e.type==='error'?'var(--danger)':e.type==='success'?'var(--acc)':'var(--txt2)'}},h('span',{style:{color:'var(--txt3)',flexShrink:0}},e.t),h('span',null,e.msg));}))
+      h('div',{className:'card',style:{marginBottom:14}},
+        h('div',{style:{fontWeight:700,fontSize:16,marginBottom:14}},'GitHub + Google Setup'),
+        h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:2.1}},
+          h('div',null,h('strong',{style:{color:'var(--txt)'}},'Step 1:'),' Host on GitHub Pages (free) — ',h('a',{href:'https://github.com',target:'_blank'},'github.com'),' → New repo → Upload as index.html → Settings → Pages → Deploy from main'),
+          h('div',{style:{marginTop:8}},h('strong',{style:{color:'var(--txt)'}},'Step 2:'),' Create OAuth Client at ',h('a',{href:'https://console.cloud.google.com',target:'_blank'},'console.cloud.google.com'),' → type: Web application'),
+          h('div',{style:{marginTop:8}},h('strong',{style:{color:'var(--txt)'}},'JS Origins:'),' ',h('code',null,appUrl.split('/').slice(0,3).join('/'))),
+          h('div',{style:{marginTop:4}},h('strong',{style:{color:'var(--txt)'}},'Redirect URIs:'),' leave empty (GIS does not need redirect URIs)'),
+          h('div',{style:{marginTop:8}},h('strong',{style:{color:'var(--warn)'}},'Important:'),' The "client_secret is missing" error means you used PKCE flow. With GIS token model, redirect URIs are not needed. If you get this error, make sure you are using the latest version of this app.')
+        )
+      )
     )
   );
 }
@@ -1205,31 +1409,49 @@ function App(){
     return merged.length;
   }
 
-  // Auto-fetch from Drive on startup
+  // Auto-fetch from Drive on every startup — Drive is source of truth
   useEffect(function(){
     var cid=localStorage.getItem('gd_cid');
-    if(!cid||!GDrive.isValid())return;
+    if(!cid)return; // never connected — skip
     setSyncStatus('loading');
+    // Always call getToken — GIS will silently refresh if expired, or show picker
     GDrive.getToken(cid,function(tok,err){
       if(err||!tok){setSyncStatus('idle');return;}
-      var dataFid=localStorage.getItem('gd_data_fid');
-      function load(fid){
-        GDrive.downloadJSON(tok,fid,function(err2,data){
-          if(err2||!data){setSyncStatus('error');return;}
-          var cnt=applyDriveData(data);
-          setSyncStatus('loaded:'+cnt);
-        });
-      }
-      if(dataFid){load(dataFid);}
-      else{
-        GDrive.findFile(tok,'','kw_data.json',function(err2,file){
-          if(err2||!file){setSyncStatus('idle');return;}
-          localStorage.setItem('gd_data_fid',file.id);
-          load(file.id);
-        });
-      }
+      fetchAllFromDrive(tok);
     });
   },[]);
+
+  function fetchAllFromDrive(tok){
+    setSyncStatus('loading');
+    var dataFid=localStorage.getItem('gd_data_fid');
+    function load(fid){
+      GDrive.downloadJSON(tok,fid,function(err2,data){
+        if(err2||!data){
+          // Try searching again — file ID may have changed
+          GDrive.findFile(tok,'','kw_data.json',function(e3,file){
+            if(e3||!file){setSyncStatus('error');return;}
+            localStorage.setItem('gd_data_fid',file.id);
+            GDrive.downloadJSON(tok,file.id,function(e4,data2){
+              if(e4||!data2){setSyncStatus('error');return;}
+              var cnt=applyDriveData(data2);
+              setSyncStatus('loaded:'+cnt);
+            });
+          });
+          return;
+        }
+        var cnt=applyDriveData(data);
+        setSyncStatus('loaded:'+cnt);
+      });
+    }
+    if(dataFid){ load(dataFid); }
+    else{
+      GDrive.findFile(tok,'','kw_data.json',function(err2,file){
+        if(err2||!file){setSyncStatus('idle');return;}
+        localStorage.setItem('gd_data_fid',file.id);
+        load(file.id);
+      });
+    }
+  }
 
   // Debounced Drive sync — 2s after last change
   var _syncTimer=null;
