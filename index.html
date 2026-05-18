@@ -187,7 +187,17 @@ function pkce_challenge(v){return crypto.subtle.digest('SHA-256',new TextEncoder
   sessionStorage.removeItem('pkce_v_'+state);sessionStorage.removeItem('pkce_p_'+state);
   if(!verifier){localStorage.setItem('oauth_result',JSON.stringify({error:'verifier_missing'}));return;}
   var redir=window.location.origin+window.location.pathname;
-  // Google now uses GIS token model (no redirect needed)
+  if(provider==='google'){
+    fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'grant_type=authorization_code&client_id='+encodeURIComponent(localStorage.getItem('gd_cid')||'')+'&code='+encodeURIComponent(code)+'&redirect_uri='+encodeURIComponent(redir)+'&code_verifier='+encodeURIComponent(verifier)})
+    .then(function(r){return r.json();}).then(function(d){
+      if(d.access_token){
+        localStorage.setItem('gd_tok',d.access_token);localStorage.setItem('gd_exp',String(Date.now()+(parseInt(d.expires_in)||3600)*1000-60000));
+        if(d.refresh_token)localStorage.setItem('gd_ref',d.refresh_token);
+        localStorage.setItem('oauth_result',JSON.stringify({ok:true,provider:'google'}));
+      }else{localStorage.setItem('oauth_result',JSON.stringify({error:d.error_description||d.error,provider:'google'}));}
+    }).catch(function(e){localStorage.setItem('oauth_result',JSON.stringify({error:e.message,provider:'google'}));});
+  }
   if(provider==='onedrive'){
     fetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:'grant_type=authorization_code&client_id=e40a53ec-44f9-42b3-b3bc-a7d5db58bf49&code='+encodeURIComponent(code)+'&redirect_uri='+encodeURIComponent(redir)+'&code_verifier='+encodeURIComponent(verifier)+'&scope='+encodeURIComponent('Files.ReadWrite offline_access')})
@@ -201,184 +211,75 @@ function pkce_challenge(v){return crypto.subtle.digest('SHA-256',new TextEncoder
   }
 })();
 
-// ── Push all app data to Drive (called on every change, debounced 2s) ──
-function pushDataToDrive(){
-  var cid=localStorage.getItem('gd_cid')||'';
-  if(!cid||!GDrive.isValid())return;
-  GDrive.getToken(cid,function(tok,err){
-    if(err||!tok)return;
-    try{
-      var appData={
-        version:2,
-        savedAt:new Date().toISOString(),
-        invoices:  JSON.parse(localStorage.getItem('kw_invoices')||'[]'),
-        customers: JSON.parse(localStorage.getItem('kw_custs')   ||'[]'),
-        items:     JSON.parse(localStorage.getItem('kw_items')   ||'[]'),
-        rates:     JSON.parse(localStorage.getItem('kw_rates')   ||'{}'),
-        invS:      JSON.parse(localStorage.getItem('kw_invS')    ||'{}')
-      };
-      var dataFid=localStorage.getItem('gd_data_fid')||null;
-      GDrive.uploadJSON(tok,'kw_data.json',appData,dataFid,function(e2,fid){
-        if(!e2&&fid)localStorage.setItem('gd_data_fid',fid);
-      });
-    }catch(e){}
-  });
-}
-
-// ── Auto-sync PDF when new invoice is saved ──
-function autoSyncToDrive(newInv, allInvoices){
-  if(!GDrive.isValid())return;
-  var cid=localStorage.getItem('gd_cid')||'';
-  var folder=localStorage.getItem('gd_folder')||'Krazy Wholesale Invoices';
-  if(!cid)return;
-  GDrive.getToken(cid,function(tok,err){
-    if(err||!tok)return;
-    // Upload the new invoice PDF silently
-    toPDF(buildHTML(newInv),function(pdfErr,b64){
-      if(!pdfErr&&b64){
-        GDrive.upload(tok,folder,newInv.number+'.pdf',b64,'application/pdf',null,function(){
-          try{
-            var sids=JSON.parse(localStorage.getItem('synced_ids')||'[]');
-            if(!sids.includes(newInv.id)){sids.push(newInv.id);localStorage.setItem('synced_ids',JSON.stringify(sids));}
-          }catch(e){}
-        });
-      }
-      // kw_data.json is already being saved by scheduleSync() in App setters
-      // so no need to duplicate here
-    });
-  });
-}
-
-// Google Drive — uses Google Identity Services (GIS) token model
-// No client_secret needed. No PKCE. Works in any browser.
-// GIS library is loaded on demand when user clicks Sign In.
+// Google Drive PKCE
 var GDrive=(function(){
-  function isValid(){
-    return !!localStorage.getItem('gd_tok') && Date.now()<parseInt(localStorage.getItem('gd_exp')||0);
-  }
-  function saveTok(tok,exp){
-    localStorage.setItem('gd_tok',tok);
-    localStorage.setItem('gd_exp',String(Date.now()+(exp-120)*1000));
-  }
-  function clear(){
-    ['gd_tok','gd_exp'].forEach(function(k){localStorage.removeItem(k);});
-  }
-
-  // Load GIS library once, then request token
-  function loadGIS(cb){
-    if(window.google && window.google.accounts){cb();return;}
-    var s=document.createElement('script');
-    s.src='https://accounts.google.com/gsi/client';
-    s.onload=function(){cb();};
-    s.onerror=function(){cb(new Error('Failed to load Google Identity Services'));};
-    document.head.appendChild(s);
-  }
-
-  function getToken(clientId,cb){
-    // Return stored token if still valid
-    if(isValid()){cb(localStorage.getItem('gd_tok'),null);return;}
-    localStorage.setItem('gd_cid',clientId);
-    loadGIS(function(err){
-      if(err){cb(null,err.message||'Failed to load GIS');return;}
-      try{
-        var client=google.accounts.oauth2.initTokenClient({
-          client_id: clientId,
-          scope: 'https://www.googleapis.com/auth/drive.file',
-          callback: function(resp){
-            if(resp.error){cb(null,resp.error+': '+( resp.error_description||''));return;}
-            saveTok(resp.access_token, parseInt(resp.expires_in)||3600);
-            cb(resp.access_token, null);
+  function isValid(){return!!localStorage.getItem('gd_tok')&&Date.now()<parseInt(localStorage.getItem('gd_exp')||0);}
+  function clear(){['gd_tok','gd_exp','gd_ref'].forEach(function(k){localStorage.removeItem(k);});}
+  function doAuth(clientId,cb){
+    var ver=pkce_random(64),state=pkce_random(16);
+    sessionStorage.setItem('pkce_v_'+state,ver);sessionStorage.setItem('pkce_p_'+state,'google');
+    var redir=window.location.origin+window.location.pathname;
+    pkce_challenge(ver).then(function(ch){
+      var url='https://accounts.google.com/o/oauth2/v2/auth?client_id='+encodeURIComponent(clientId)+'&redirect_uri='+encodeURIComponent(redir)+'&response_type=code&scope='+encodeURIComponent('https://www.googleapis.com/auth/drive.file')+'&code_challenge='+ch+'&code_challenge_method=S256&state='+state+'&access_type=offline&prompt=consent';
+      var pop=null;try{pop=window.open(url,'gdauth','width=500,height=640,scrollbars=yes');}catch(e){}
+      if(!pop||pop.closed||typeof pop.closed==='undefined'){window.location.href=url;return;}
+      var iv=setInterval(function(){
+        try{var href=pop.location.href;
+          if(href&&href.indexOf(redir)===0){clearInterval(iv);pop.close();
+            var u=new URL(href),code=u.searchParams.get('code'),err=u.searchParams.get('error');
+            if(err){cb(null,'Auth denied: '+err);return;}
+            if(code){exchangeG(clientId,code,redir,ver,cb);}
           }
-        });
-        client.requestAccessToken({prompt:'consent'});
-      }catch(e){cb(null,e.message);}
+        }catch(e){}
+      },500);
+      setTimeout(function(){clearInterval(iv);if(!pop.closed)pop.close();},300000);
     });
   }
-
-  // Find or create a folder, then upload file
+  function exchangeG(cid,code,redir,ver,cb){
+    fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'grant_type=authorization_code&client_id='+encodeURIComponent(cid)+'&code='+encodeURIComponent(code)+'&redirect_uri='+encodeURIComponent(redir)+'&code_verifier='+encodeURIComponent(ver)})
+    .then(function(r){return r.json();}).then(function(d){
+      if(d.access_token){localStorage.setItem('gd_tok',d.access_token);localStorage.setItem('gd_exp',String(Date.now()+(parseInt(d.expires_in)||3600)*1000-60000));if(d.refresh_token)localStorage.setItem('gd_ref',d.refresh_token);cb(d.access_token,null);}
+      else cb(null,d.error_description||d.error||'Token exchange failed');
+    }).catch(function(e){cb(null,e.message);});
+  }
+  function refreshG(cb){
+    var cid=localStorage.getItem('gd_cid'),ref=localStorage.getItem('gd_ref');
+    if(!cid||!ref){cb(null,'No refresh token');return;}
+    fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=refresh_token&client_id='+encodeURIComponent(cid)+'&refresh_token='+encodeURIComponent(ref)})
+    .then(function(r){return r.json();}).then(function(d){
+      if(d.access_token){localStorage.setItem('gd_tok',d.access_token);localStorage.setItem('gd_exp',String(Date.now()+(parseInt(d.expires_in)||3600)*1000-60000));cb(d.access_token,null);}
+      else{clear();cb(null,d.error||'Refresh failed');}
+    }).catch(function(e){cb(null,e.message);});
+  }
+  function getToken(clientId,cb){
+    if(isValid()){cb(localStorage.getItem('gd_tok'),null);return;}
+    var ref=localStorage.getItem('gd_ref');
+    if(ref){refreshG(cb);return;}
+    doAuth(clientId,cb);
+  }
   function folder(name,tok){
-    var q="name='"+name.replace(/'/g,"\\'")+"' and mimeType='application/vnd.google-apps.folder' and trashed=false";
-    return fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name)',
-      {headers:{Authorization:'Bearer '+tok}})
-      .then(function(r){return r.json();})
-      .then(function(r){
+    return fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent("name='"+name.replace(/'/g,"\\'")+"' and mimeType='application/vnd.google-apps.folder' and trashed=false")+'&fields=files(id)',{headers:{Authorization:'Bearer '+tok}})
+      .then(function(r){return r.json();}).then(function(r){
         if(r.files&&r.files.length)return r.files[0];
-        return fetch('https://www.googleapis.com/drive/v3/files?fields=id,name',{
-          method:'POST',
-          headers:{Authorization:'Bearer '+tok,'Content-Type':'application/json'},
-          body:JSON.stringify({name:name,mimeType:'application/vnd.google-apps.folder'})
-        }).then(function(r){return r.json();});
+        return fetch('https://www.googleapis.com/drive/v3/files?fields=id',{method:'POST',headers:{Authorization:'Bearer '+tok,'Content-Type':'application/json'},body:JSON.stringify({name:name,mimeType:'application/vnd.google-apps.folder'})}).then(function(r){return r.json();});
       });
   }
-
   function upload(tok,folderName,filename,b64,mime,existId,cb){
-    var bin=atob(b64),bytes=new Uint8Array(bin.length);
-    for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    var bin=atob(b64),bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
     function doUp(parentId){
-      var bnd='KWb';
-      var meta=JSON.stringify(existId
-        ?{name:filename,mimeType:mime}
-        :{name:filename,mimeType:mime,parents:parentId?[parentId]:[]});
+      var bnd='KWb';var meta=JSON.stringify(existId?{name:filename,mimeType:mime}:{name:filename,mimeType:mime,parents:parentId?[parentId]:[]});
       var pre=new TextEncoder().encode('--'+bnd+'\r\nContent-Type: application/json\r\n\r\n'+meta+'\r\n--'+bnd+'\r\nContent-Type: '+mime+'\r\n\r\n');
       var post=new TextEncoder().encode('\r\n--'+bnd+'--');
-      var body=new Uint8Array(pre.length+bytes.length+post.length);
-      body.set(pre);body.set(bytes,pre.length);body.set(post,pre.length+bytes.length);
-      var url=existId
-        ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,name'
-        :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name';
-      fetch(url,{
-        method:existId?'PATCH':'POST',
-        headers:{Authorization:'Bearer '+tok,'Content-Type':'multipart/related; boundary='+bnd},
-        body:body.buffer
-      }).then(function(r){return r.json();})
-        .then(function(r){cb(r&&r.id?null:(r.error&&r.error.message)||'Upload failed',r&&r.id);})
-        .catch(function(e){cb(e.message);});
+      var body=new Uint8Array(pre.length+bytes.length+post.length);body.set(pre);body.set(bytes,pre.length);body.set(post,pre.length+bytes.length);
+      fetch((existId?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,name':'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name'),
+        {method:existId?'PATCH':'POST',headers:{Authorization:'Bearer '+tok,'Content-Type':'multipart/related; boundary='+bnd},body:body.buffer})
+        .then(function(r){return r.json();}).then(function(r){cb(r&&r.id?null:(r.error&&r.error.message)||'Upload failed',r&&r.id);}).catch(function(e){cb(e.message);});
     }
     if(!folderName){doUp(null);return;}
     folder(folderName,tok).then(function(f){doUp(f?f.id:null);}).catch(function(e){cb(e.message);});
   }
-
-
-  // Upload sync JSON to Drive ROOT (no subfolder) so any device can find it
-  function uploadJSON(tok, filename, obj, existId, cb){
-    var json = JSON.stringify(obj);
-    // Safe base64 encoding that handles Unicode
-    var bytes = new TextEncoder().encode(json);
-    var b64 = btoa(String.fromCharCode.apply(null, bytes));
-    // Always store in root - no folder - makes cross-device discovery reliable
-    upload(tok, null, filename, b64, 'application/json', existId, cb);
-  }
-
-  // Download and parse JSON from Drive by file ID
-  function downloadJSON(tok, fileId, cb){
-    fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media',
-      {headers:{Authorization:'Bearer '+tok}})
-    .then(function(r){
-      if(!r.ok){cb('HTTP '+r.status);return;}
-      return r.text();
-    })
-    .then(function(t){
-      if(!t){cb('Empty response');return;}
-      try{ cb(null, JSON.parse(t)); }
-      catch(e){ cb('Parse error: '+e.message); }
-    }).catch(function(e){ cb(e.message); });
-  }
-
-  // Find kw_data.json anywhere in Drive (searches all files, not just subfolder)
-  function findFile(tok, folderName, filename, cb){
-    // Search entire Drive for the file by name - most reliable cross-device
-    var q = "name='"+filename+"' and trashed=false";
-    fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name,modifiedTime)&orderBy=modifiedTime+desc',
-      {headers:{Authorization:'Bearer '+tok}})
-    .then(function(r){return r.json();})
-    .then(function(r){
-      cb(null, r.files&&r.files.length?r.files[0]:null);
-    }).catch(function(e){ cb(e.message); });
-  }
-
-
-
-  return{isValid:isValid,getToken:getToken,upload:upload,uploadJSON:uploadJSON,downloadJSON:downloadJSON,findFile:findFile,clear:clear};
+  return{isValid:isValid,getToken:getToken,upload:upload,clear:clear};
 })();
 
 // OneDrive PKCE
@@ -434,49 +335,49 @@ var OneDrive=(function(){
       {method:'PUT',headers:{Authorization:'Bearer '+tok,'Content-Type':'application/octet-stream'},body:bytes.buffer})
     .then(function(r){return r.json();}).then(function(r){cb(r&&r.id?null:(r.error&&r.error.message)||'Upload failed',r&&r.id);}).catch(function(e){cb(e.message);});
   }
-
-  // Upload sync JSON to Drive ROOT (no subfolder) so any device can find it
-  function uploadJSON(tok, filename, obj, existId, cb){
-    var json = JSON.stringify(obj);
-    // Safe base64 encoding that handles Unicode
-    var bytes = new TextEncoder().encode(json);
-    var b64 = btoa(String.fromCharCode.apply(null, bytes));
-    // Always store in root - no folder - makes cross-device discovery reliable
-    upload(tok, null, filename, b64, 'application/json', existId, cb);
-  }
-
-  // Download and parse JSON from Drive by file ID
-  function downloadJSON(tok, fileId, cb){
-    fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media',
-      {headers:{Authorization:'Bearer '+tok}})
-    .then(function(r){
-      if(!r.ok){cb('HTTP '+r.status);return;}
-      return r.text();
-    })
-    .then(function(t){
-      if(!t){cb('Empty response');return;}
-      try{ cb(null, JSON.parse(t)); }
-      catch(e){ cb('Parse error: '+e.message); }
-    }).catch(function(e){ cb(e.message); });
-  }
-
-  // Find kw_data.json anywhere in Drive (searches all files, not just subfolder)
-  function findFile(tok, folderName, filename, cb){
-    // Search entire Drive for the file by name - most reliable cross-device
-    var q = "name='"+filename+"' and trashed=false";
-    fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name,modifiedTime)&orderBy=modifiedTime+desc',
-      {headers:{Authorization:'Bearer '+tok}})
-    .then(function(r){return r.json();})
-    .then(function(r){
-      cb(null, r.files&&r.files.length?r.files[0]:null);
-    }).catch(function(e){ cb(e.message); });
-  }
-
-
-
-  return{isValid:isValid,getToken:getToken,upload:upload,uploadJSON:uploadJSON,downloadJSON:downloadJSON,findFile:findFile,clear:clear};
+  return{isValid:isValid,getToken:getToken,upload:upload,clear:clear};
 })();
 
+
+// Push all data to Drive (called by scheduleSync, debounced 2s)
+function pushDataToDrive(){
+  var cid=localStorage.getItem('gd_cid')||'';
+  if(!cid||!GDrive.isValid())return;
+  GDrive.getToken(cid,function(tok,err){
+    if(err||!tok)return;
+    try{
+      var d={version:2,savedAt:new Date().toISOString(),
+        invoices: JSON.parse(localStorage.getItem('kw_invoices')||'[]'),
+        customers:JSON.parse(localStorage.getItem('kw_custs')   ||'[]'),
+        items:    JSON.parse(localStorage.getItem('kw_items')   ||'[]'),
+        rates:    JSON.parse(localStorage.getItem('kw_rates')   ||'{}'),
+        invS:     JSON.parse(localStorage.getItem('kw_invS')    ||'{}')
+      };
+      var fid=localStorage.getItem('gd_data_fid')||null;
+      GDrive.uploadJSON(tok,'kw_data.json',d,fid,function(e2,nfid){if(!e2&&nfid)localStorage.setItem('gd_data_fid',nfid);});
+    }catch(e){}
+  });
+}
+
+// Auto-sync new/edited invoice PDF to Drive silently
+function autoSyncToDrive(newInv,allInvoices,doneCb){
+  if(!GDrive.isValid()){if(typeof doneCb==='function')doneCb(false);return;}
+  var cid=localStorage.getItem('gd_cid')||'';
+  var folder=localStorage.getItem('gd_folder')||'Krazy Wholesale Invoices';
+  if(!cid){if(typeof doneCb==='function')doneCb(false);return;}
+  GDrive.getToken(cid,function(tok,err){
+    if(err||!tok){if(typeof doneCb==='function')doneCb(false);return;}
+    toPDF(buildHTML(newInv),function(pdfErr,b64){
+      if(!pdfErr&&b64){
+        GDrive.upload(tok,folder,newInv.number+'.pdf',b64,'application/pdf',null,function(){
+          try{var sids=JSON.parse(localStorage.getItem('synced_ids')||'[]');if(!sids.includes(newInv.id)){sids.push(newInv.id);localStorage.setItem('synced_ids',JSON.stringify(sids));}}catch(e){}
+        });
+      }
+      pushDataToDrive();
+      if(typeof doneCb==='function')doneCb(true);
+    });
+  });
+}
 </script>
 <script>
 (function(){
@@ -695,14 +596,15 @@ function InvSeries(p){
 }
 
 function NewInvoice(p){
-  var SC=useState(''),selC=SC[0],setSelC=SC[1];
-  var IT=useState('taxable'),invType=IT[0],setInvType=IT[1];
-  var TX=useState('8.00'),taxPct=TX[0],setTaxPct=TX[1];
-  var TT=useState(''),invTot=TT[0],setInvTot=TT[1];
-  var SI=useState([]),selIds=SI[0],setSelIds=SI[1];
-  var LI=useState([]),lines=LI[0],setLines=LI[1];
-  var DT=useState(today()),invDate=DT[0],setInvDate=DT[1];
-  var NN=useState(buildNo(p.invS)),invNum=NN[0],setInvNum=NN[1];
+  var ei=p.editInv||null;
+  var SC=useState(ei?String(ei.customerId):''),selC=SC[0],setSelC=SC[1];
+  var IT=useState(ei?ei.type:'taxable'),invType=IT[0],setInvType=IT[1];
+  var TX=useState(ei?String(ei.taxPct||0):'8.00'),taxPct=TX[0],setTaxPct=TX[1];
+  var TT=useState(ei&&ei.type==='nontaxable'?String(ei.grandTotal):''),invTot=TT[0],setInvTot=TT[1];
+  var SI=useState(ei?ei.lineItems.map(function(l,i){return l.itemId||('ei_'+i);}):  []),selIds=SI[0],setSelIds=SI[1];
+  var LI=useState(ei?ei.lineItems.map(function(l,i){return Object.assign({},l,{itemId:l.itemId||('ei_'+i)});}): []),lines=LI[0],setLines=LI[1];
+  var DT=useState(ei?ei.date:today()),invDate=DT[0],setInvDate=DT[1];
+  var NN=useState(ei?ei.number:buildNo(p.invS)),invNum=NN[0],setInvNum=NN[1];
   var cust=p.custs.find(function(c){return String(c.id)===selC;});
   var catItems=p.items.filter(function(i){return invType==='taxable'?i.category==='taxable':i.category==='nontaxable';});
   useEffect(function(){
@@ -746,16 +648,45 @@ function NewInvoice(p){
   var ntv=invType==='nontaxable'?ntVal():null;
   function canSave(){if(!selC||!lines.length)return false;if(invType==='nontaxable'&&(!ntv||!ntv.ok||ntv.hasErr))return false;return true;}
   function save(){
-    var inv={id:Date.now(),number:invNum.trim()||buildNo(p.invS),date:invDate,customerId:cust.id,customerName:cust.businessName,contactName:cust.contactName,address:cust.address,type:invType,taxPct:invType==='taxable'?parseFloat(taxPct)||0:0,lineItems:lines.map(function(l){return{name:l.name,qty:parseFloat(l.qty)||0,rate:parseFloat(l.rate)||0,origRate:l.origRate};}),subtotal:invType==='taxable'?sub:parseFloat(invTot)||0,taxAmount:invType==='taxable'?taxAmt:0,grandTotal:invType==='taxable'?grand:parseFloat(invTot)||0};
-    var newInvoices=p.invoices.concat([inv]);
-    p.setInvoices(function(is){return is.concat([inv]);});
-    p.setInvS(function(s){return Object.assign({},s,{nextNum:String((parseInt(s.nextNum)||1)+1)});});
+    var inv={
+      id:ei?ei.id:Date.now(),
+      number:ei?ei.number:(invNum.trim()||buildNo(p.invS)),
+      date:invDate,customerId:cust.id,customerName:cust.businessName,
+      contactName:cust.contactName,address:cust.address,type:invType,
+      taxPct:invType==='taxable'?parseFloat(taxPct)||0:0,
+      lineItems:lines.map(function(l){return{name:l.name,qty:parseFloat(l.qty)||0,rate:parseFloat(l.rate)||0,origRate:l.origRate};}),
+      subtotal:invType==='taxable'?sub:parseFloat(invTot)||0,
+      taxAmount:invType==='taxable'?taxAmt:0,
+      grandTotal:invType==='taxable'?grand:parseFloat(invTot)||0
+    };
+    var newInvoices;
+    if(ei){
+      newInvoices=p.invoices.map(function(x){return x.id===inv.id?inv:x;});
+      p.setInvoices(newInvoices);
+      if(p.setEditInv)p.setEditInv(null);
+    } else {
+      newInvoices=p.invoices.concat([inv]);
+      p.setInvoices(function(is){return is.concat([inv]);});
+      p.setInvS(function(s){return Object.assign({},s,{nextNum:String((parseInt(s.nextNum)||1)+1)});});
+    }
+    if(GDrive.isValid()){
+      if(p.setToast)p.setToast({msg:'⏳ Saving '+inv.number+' to Google Drive...',type:'info'});
+      autoSyncToDrive(inv,newInvoices,function(ok){
+        if(p.setToast){
+          p.setToast({msg:ok?'✅ '+inv.number+' saved to Google Drive':'⚠ Saved locally — Drive sync failed',type:ok?'ok':'warn'});
+          setTimeout(function(){if(p.setToast)p.setToast(null);},5000);
+        }
+      });
+    } else {
+      if(p.setToast){
+        p.setToast({msg:inv.number+(ei?' updated':' saved')+' locally. Go to Sync page to push to Drive.',type:'warn'});
+        setTimeout(function(){if(p.setToast)p.setToast(null);},5000);
+      }
+    }
     p.setPage('invoices');
-    // Auto-sync to Drive in background if connected
-    autoSyncToDrive(inv, newInvoices);
   }
   return h('div',null,
-    h('div',{className:'page-hdr'},h('h2',null,'New Invoice')),
+    h('div',{className:'page-hdr'},h('h2',null,ei?'Edit Invoice — '+ei.number:'New Invoice')),
     h('div',{className:'card'},
       h('div',{className:'card-header'},h('h3',null,'Step 1 \u2014 Customer & Type')),
       h('div',{className:'form-row c2'},
@@ -820,7 +751,7 @@ function NewInvoice(p){
     ),
     selC&&h('div',{className:'fr',style:{justifyContent:'flex-end',marginTop:14}},
       h('button',{className:'btn btn-secondary',onClick:function(){p.setPage('invoices');}},'\u274C Cancel'),
-      h('button',{className:'btn btn-primary',disabled:!canSave(),onClick:save},'\uD83D\uDCBE Save Invoice')
+      h('button',{className:'btn btn-primary',disabled:!canSave(),onClick:save},ei?'Update Invoice':'Save Invoice')
     )
   );
 }
@@ -843,7 +774,7 @@ function InvoiceList(p){
           h('td',null,h('div',{className:'fr'},
             h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setViewing(inv);}},'\uD83D\uDC41 View'),
             h('button',{className:'btn btn-sm btn-secondary',onClick:function(){printInv(inv);}},'\uD83D\uDDA8 Print'),
-            h('button',{className:'btn btn-sm btn-danger',onClick:function(){del(inv.id);}},'\uD83D\uDDD1\uFE0F')
+            h('button',{className:'btn btn-sm btn-secondary',style:{background:'rgba(0,229,160,.1)',color:'var(--acc)',border:'1px solid rgba(0,229,160,.3)'},onClick:function(){if(p.setEditInv&&p.setPage){p.setEditInv(inv);p.setPage('editInvoice');}}},'✏️ Edit'),h('button',{className:'btn btn-sm btn-danger',onClick:function(){del(inv.id);}},'🗑️')
           ))
         );}))
       ))
@@ -905,63 +836,8 @@ function DriveSync(p){
     }catch(e){}
   },[]);
 
-  function gdSignIn(){
-    var cid=gcid.trim();
-    if(!cid){addLog('Enter Client ID first','error');return;}
-    localStorage.setItem('gd_cid',cid);
-    addLog('Loading Google sign-in...','info');
-    GDrive.getToken(cid,function(tok,err){
-      if(err){
-        addLog('Sign-in failed: '+err,'error');
-        addLog('Tip: Make sure you created a Web application OAuth client in Google Console','info');
-        return;
-      }
-      setGcon(true);
-      addLog('Google Drive connected!','success');
-    });
-  }
+  function gdSignIn(){var cid=gcid.trim();if(!cid){addLog('Enter Client ID','error');return;}localStorage.setItem('gd_cid',cid);addLog('Opening Google sign-in...','info');GDrive.getToken(cid,function(tok,err){if(err){addLog('Failed: '+err,'error');return;}setGcon(true);addLog('Google Drive connected!','success');});}
   function gdSignOut(){GDrive.clear();setGcon(false);addLog('Signed out','info');}
-
-  function fetchFromDrive(){
-    setBusy(true);setLog([]);
-    addLog('Connecting to Google Drive...','info');
-    GDrive.getToken(gcid,function(tok,err){
-      if(err){addLog('Auth error: '+err,'error');setBusy(false);setGcon(false);return;}
-      setGcon(true);
-      var fn=gf.trim()||'Krazy Wholesale Invoices';
-      var dataFid=localStorage.getItem('gd_data_fid');
-      function doLoad(fid){
-        addLog('Downloading sync data from Drive...','info');
-        GDrive.downloadJSON(tok,fid,function(err2,data){
-          if(err2){addLog('Download error: '+err2,'error');setBusy(false);return;}
-          if(!data||!data.invoices){addLog('No data found in Drive file','error');setBusy(false);return;}
-          // Apply the data — Drive wins
-          if(data.invoices){p.setInvoices(data.invoices);addLog('✓ '+data.invoices.length+' invoices loaded','success');}
-          if(data.customers){p.setCusts(data.customers);addLog('✓ '+data.customers.length+' customers loaded','success');}
-          if(data.items){p.setItems(data.items);addLog('✓ '+data.items.length+' items loaded','success');}
-          if(data.rates){p.setRates(data.rates);}
-          if(data.invS){p.setInvS(data.invS);}
-          if(data.savedAt){addLog('Data saved on: '+new Date(data.savedAt).toLocaleString(),'info');}
-          addLog('--- All data loaded from Drive ---','success');
-          setBusy(false);
-        });
-      }
-      if(dataFid){
-        doLoad(dataFid);
-      } else {
-        addLog('Searching for sync data in Drive...','info');
-        GDrive.findFile(tok,fn,'kw_data.json',function(err2,file){
-          if(err2||!file){
-            addLog('No sync data found in Drive folder "'+fn+'".','error');
-            addLog('Sync your data first from the device where invoices are created.','info');
-            setBusy(false);return;
-          }
-          localStorage.setItem('gd_data_fid',file.id);
-          doLoad(file.id);
-        });
-      }
-    });
-  }
 
   function gdUploadOne(inv,tok,cb){
     addLog('Rendering '+inv.number+'...','info');
@@ -978,47 +854,17 @@ function DriveSync(p){
     setBusy(true);setLog([]);
     GDrive.getToken(gcid,function(tok,err){
       if(err){addLog('Auth: '+err,'error');setBusy(false);setGcon(false);return;}
-      setGcon(true);
-      var ns=sids.slice(),idx=0,fn=gf.trim()||'Krazy Wholesale Invoices';
-      var totalSteps=pending.length+2; // +Excel +JSON
+      setGcon(true);var ns=sids.slice(),idx=0,fn=gf.trim()||'Krazy Wholesale Invoices';
       function next(){
         if(idx>=pending.length){
-          // Step: Upload Invoice_Master.xlsx
-          setProg({cur:pending.length+1,tot:totalSteps,lbl:'Invoice_Master.xlsx'});
-          addLog('Uploading Invoice_Master.xlsx...','info');
-          GDrive.upload(tok,fn,'Invoice_Master.xlsx',buildXLSX(p.invoices),
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',gMid||null,
-            function(err2,fid){
-              if(!err2&&fid){setGMid(fid);localStorage.setItem('gd_mid',fid);addLog('\u2713 Invoice_Master.xlsx','success');}
-              // Step: Upload kw_data.json (used for cross-device sync)
-              setProg({cur:totalSteps,tot:totalSteps,lbl:'Saving sync data...'});
-              addLog('Saving sync data (kw_data.json)...','info');
-              var dataFid=localStorage.getItem('gd_data_fid')||null;
-              var appData={
-                version:2,
-                savedAt:new Date().toISOString(),
-                invoices:p.invoices,
-                customers:p.custs,
-                items:p.items,
-                rates:p.rates,
-                invS:p.invS
-              };
-              GDrive.uploadJSON(tok,'kw_data.json',appData,dataFid,function(err3,jfid){
-                if(!err3&&jfid){
-                  localStorage.setItem('gd_data_fid',jfid);
-                  addLog('\u2713 kw_data.json saved (cross-device sync ready)','success');
-                } else {
-                  addLog('\u26A0 kw_data.json error: '+(err3||'unknown'),'error');
-                }
-                setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));
-                setBusy(false);setProg({cur:0,tot:0,lbl:''});
-                addLog('--- Sync complete. Open app on any device to fetch this data. ---','success');
-              });
-            });
-          return;
+          setProg({cur:pending.length+1,tot:pending.length+1,lbl:'Invoice_Master.xlsx'});
+          GDrive.upload(tok,fn,'Invoice_Master.xlsx',buildXLSX(p.invoices),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',gMid||null,function(err2,fid){
+            if(!err2&&fid){setGMid(fid);localStorage.setItem('gd_mid',fid);addLog('\u2713 Invoice_Master.xlsx','success');}
+            setSids(ns);localStorage.setItem('synced_ids',JSON.stringify(ns));
+            setBusy(false);setProg({cur:0,tot:0,lbl:''});addLog('--- Complete ---','success');
+          });return;
         }
-        var inv=pending[idx];
-        setProg({cur:idx+1,tot:totalSteps,lbl:inv.number});
+        var inv=pending[idx];setProg({cur:idx+1,tot:pending.length+1,lbl:inv.number});
         gdUploadOne(inv,tok,function(ok){if(ok)ns.push(inv.id);idx++;setTimeout(next,300);});
       }
       next();
@@ -1099,8 +945,7 @@ function DriveSync(p){
       h('span',{style:{color:'var(--txt3)'}},'|'),
       ocon?h('span',{style:{fontSize:12,color:'var(--acc3)'}},'OneDrive \u25CF'):h('span',{style:{fontSize:12,color:'var(--txt3)'}},'OneDrive \u25CB'),
       h('div',{style:{flex:1}}),
-      h('button',{className:'btn btn-sm btn-primary',disabled:busy,onClick:fetchFromDrive,style:{display:gcon?'inline-flex':'none'}},'↓ Fetch from Drive'),
-      h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setSids([]);localStorage.removeItem('synced_ids');addLog('Reset','info');}},'↺ Reset')
+      h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setSids([]);localStorage.removeItem('synced_ids');addLog('Reset','info');}},'\u21BA Reset')
     ),
     h('div',{className:'tabs'},TABS.map(function(t){return h('button',{key:t.id,className:'tbtn'+(activeTab===t.id?' active':''),onClick:function(){setActiveTab(t.id);}},t.lbl);})),
 
@@ -1123,22 +968,7 @@ function DriveSync(p){
         Step('1','Go to Google Cloud Console',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,h('a',{href:'https://console.cloud.google.com',target:'_blank'},'console.cloud.google.com'),' \u2014 free, no billing needed'),h('div',null,'Sign in \u2192 New Project \u2192 name anything \u2192 Create'))),
         Step('2','Enable Google Drive API',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'APIs & Services \u2192 Library \u2192 search ',h('strong',null,'Google Drive API'),' \u2192 Enable'))),
         Step('3','OAuth consent screen',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'APIs & Services \u2192 OAuth consent screen \u2192 External \u2192 Create'),h('div',null,'Fill App name + your email \u2192 Save & Continue through all steps'),h('div',null,'On Test users step: Add your Gmail address'))),
-        Step('4','Create OAuth Client ID',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},
-          h('div',null,'Credentials \u2192 Create Credentials \u2192 OAuth 2.0 Client ID'),
-          h('div',{style:{marginTop:8,padding:'10px 12px',background:'rgba(0,229,160,.08)',border:'1px solid rgba(0,229,160,.2)',borderRadius:6}},
-            h('strong',{style:{color:'var(--acc)',display:'block',marginBottom:4}},'\u2705 Application type: Web application'),
-            h('div',null,'(NOT Desktop app, NOT iOS, NOT Android)')
-          ),
-          h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:10}},'Authorized JavaScript origins \u2014 Add URI:'),
-          CopyBox(appUrl.split('/').slice(0,3).join('/')),
-          h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:8}},'Authorized redirect URIs \u2014 Add URI:'),
-          CopyBox(appUrl),
-          h('div',{style:{marginTop:10,padding:'10px 12px',background:'rgba(255,179,71,.08)',border:'1px solid rgba(255,179,71,.2)',borderRadius:6,fontSize:11}},
-            h('strong',{style:{color:'var(--warn)'}},'Important: '),
-            'The redirect URI must be your exact GitHub Pages URL. Open your app in the browser and copy the URL from the address bar \u2014 use that exact URL here.'
-          ),
-          h('div',{style:{marginTop:8}},'Click Create \u2192 Copy the ',h('strong',null,'Client ID'))
-        )),
+        Step('4','Create OAuth Client ID',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Credentials \u2192 Create Credentials \u2192 OAuth 2.0 Client ID \u2192 ',h('strong',null,'Web application')),h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:8}},'Authorized JavaScript origins:'),CopyBox(appUrl.split('/').slice(0,3).join('/')),h('div',{style:{fontWeight:600,color:'var(--txt)',marginTop:8}},'Authorized redirect URIs:'),CopyBox(appUrl),h('div',{style:{marginTop:8}},'Click Create \u2192 Copy the ',h('strong',null,'Client ID')))),
         Step('5','Connect in the Google Drive tab',h('div',{style:{fontSize:12,color:'var(--txt2)',lineHeight:1.9}},h('div',null,'Click the ',h('strong',null,'Google Drive tab'),' above \u2192 paste Client ID \u2192 Sign in'),h('div',{style:{color:'var(--acc)',marginTop:4}},'\u2705 Done! Then click Sync All.'))),
         h('div',{style:{background:'rgba(124,106,255,.07)',border:'1px solid rgba(124,106,255,.2)',borderRadius:8,padding:'12px 14px',fontSize:12,color:'var(--txt2)',lineHeight:1.9}},
           h('strong',{style:{color:'var(--acc3)',display:'block',marginBottom:4}},'\uD83D\uDCA1 Troubleshooting'),
@@ -1223,7 +1053,7 @@ function DriveSync(p){
 
     log.length>0&&h('div',{className:'card',style:{marginTop:14}},
       h('div',{className:'card-header'},h('h3',null,'Log'),h('button',{className:'btn btn-sm btn-secondary',onClick:function(){setLog([]);}},'Clear')),
-      h('div',{className:'log-box'},log.map(function(e,i){return h('div',{key:i,className:'log-line',style:{color:e.type==='error'?'var(--danger)':'var(--acc)'}},h('span',{style:{color:'var(--txt3)',flexShrink:0}},e.t),h('span',null,e.msg));}))
+      h('div',{className:'log-box'},log.map(function(e,i){return h('div',{key:i,className:'log-line',style:{color:e.type==='error'?'var(--danger)':e.type==='success'?'var(--acc)':'var(--txt2)'}},h('span',{style:{color:'var(--txt3)',flexShrink:0}},e.t),h('span',null,e.msg));}))
     )
   );
 }
@@ -1291,86 +1121,65 @@ function lsSet(key,val){try{localStorage.setItem(key,JSON.stringify(val));}catch
 
 function App(){
   var PG=useState('dashboard'),page=PG[0],setPage=PG[1];
+  var _ei=useState(null),editInv=_ei[0],setEditInv=_ei[1];
+  var _toast=useState(null),toast=_toast[0],setToast=_toast[1];
+  var _sync=useState('idle'),syncStatus=_sync[0],setSyncStatus=_sync[1];
   var CU=useState(function(){return lsGet('kw_custs',IC);}),custs=CU[0],_setCusts=CU[1];
   var IT=useState(function(){return lsGet('kw_items',II);}),items=IT[0],_setItems=IT[1];
   var RA=useState(function(){return lsGet('kw_rates',IR);}),rates=RA[0],_setRates=RA[1];
   var IN=useState(function(){return lsGet('kw_invoices',[]);}),invoices=IN[0],_setInvoices=IN[1];
   var IS=useState(function(){return lsGet('kw_invS',{prefix:'INV',separator:'-',nextNum:'1001',padding:'4'});}),invS=IS[0],_setInvS=IS[1];
-  var _sync=useState('idle'),syncStatus=_sync[0],setSyncStatus=_sync[1]; // idle|loading|loaded|error
-
   function setCusts(v){var val=typeof v==='function'?v(custs):v;_setCusts(val);lsSet('kw_custs',val);scheduleSync();}
   function setItems(v){var val=typeof v==='function'?v(items):v;_setItems(val);lsSet('kw_items',val);scheduleSync();}
   function setRates(v){var val=typeof v==='function'?v(rates):v;_setRates(val);lsSet('kw_rates',val);scheduleSync();}
   function setInvoices(v){var val=typeof v==='function'?v(invoices):v;_setInvoices(val);lsSet('kw_invoices',val);scheduleSync();}
   function setInvS(v){var val=typeof v==='function'?v(invS):v;_setInvS(val);lsSet('kw_invS',val);scheduleSync();}
 
-  // Debounced Drive sync — waits 2s after last change, then calls global pushDataToDrive
+  function applyDriveData(data){
+    function mergeById(local,drive){var m={};local.forEach(function(x){m[x.id]=x;});drive.forEach(function(x){m[x.id]=x;});return Object.keys(m).map(function(k){return m[k];}).sort(function(a,b){return a.id-b.id;});}
+    var merged=mergeById(JSON.parse(localStorage.getItem('kw_invoices')||'[]'),data.invoices||[]);
+    _setInvoices(merged);lsSet('kw_invoices',merged);
+    var mc=mergeById(JSON.parse(localStorage.getItem('kw_custs')||'[]'),data.customers||[]);
+    _setCusts(mc);lsSet('kw_custs',mc);
+    var mi=mergeById(JSON.parse(localStorage.getItem('kw_items')||'[]'),data.items||[]);
+    _setItems(mi);lsSet('kw_items',mi);
+    if(data.rates){_setRates(data.rates);lsSet('kw_rates',data.rates);}
+    if(data.invS){_setInvS(data.invS);lsSet('kw_invS',data.invS);}
+    return merged.length;
+  }
+
+  // Auto-fetch from Drive on startup
+  useEffect(function(){
+    var cid=localStorage.getItem('gd_cid');
+    if(!cid||!GDrive.isValid())return;
+    setSyncStatus('loading');
+    GDrive.getToken(cid,function(tok,err){
+      if(err||!tok){setSyncStatus('idle');return;}
+      var dataFid=localStorage.getItem('gd_data_fid');
+      function load(fid){
+        GDrive.downloadJSON(tok,fid,function(err2,data){
+          if(err2||!data){setSyncStatus('error');return;}
+          var cnt=applyDriveData(data);
+          setSyncStatus('loaded:'+cnt);
+        });
+      }
+      if(dataFid){load(dataFid);}
+      else{
+        GDrive.findFile(tok,'','kw_data.json',function(err2,file){
+          if(err2||!file){setSyncStatus('idle');return;}
+          localStorage.setItem('gd_data_fid',file.id);
+          load(file.id);
+        });
+      }
+    });
+  },[]);
+
+  // Debounced Drive sync — 2s after last change
   var _syncTimer=null;
   function scheduleSync(){
     if(!GDrive.isValid())return;
     clearTimeout(_syncTimer);
     _syncTimer=setTimeout(pushDataToDrive, 2000);
-  }
-
-  // ── Auto-fetch from Google Drive on startup ──
-  useEffect(function(){
-    var cid = localStorage.getItem('gd_cid');
-    var folder = localStorage.getItem('gd_folder') || 'Krazy Wholesale Invoices';
-    var dataFileId = localStorage.getItem('gd_data_fid');
-    if(!cid || !GDrive.isValid()) return; // not connected, skip
-    setSyncStatus('loading');
-    GDrive.getToken(cid, function(tok, err){
-      if(err || !tok){ setSyncStatus('idle'); return; }
-      // Try by stored file ID first (fast), fall back to search
-      function loadByToken(fid){
-        GDrive.downloadJSON(tok, fid, function(err2, data){
-          if(err2 || !data){ setSyncStatus('error'); return; }
-          applyDriveData(data);
-          setSyncStatus('loaded');
-        });
-      }
-      if(dataFileId){
-        loadByToken(dataFileId);
-      } else {
-        GDrive.findFile(tok, folder, 'kw_data.json', function(err2, file){
-          if(err2 || !file){ setSyncStatus('idle'); return; }
-          localStorage.setItem('gd_data_fid', file.id);
-          loadByToken(file.id);
-        });
-      }
-    });
-  }, []);
-
-  function applyDriveData(data){
-    // Merge Drive data with local — Drive wins for invoices, merge customers/items
-    if(data.invoices && data.invoices.length){
-      // Merge: keep local invoices not in Drive, add Drive invoices
-      _setInvoices(function(local){
-        var merged = data.invoices.slice();
-        local.forEach(function(li){
-          if(!merged.find(function(di){return di.id===li.id;})) merged.push(li);
-        });
-        merged.sort(function(a,b){return a.id-b.id;});
-        lsSet('kw_invoices', merged);
-        return merged;
-      });
-    }
-    if(data.customers && data.customers.length){
-      _setCusts(function(local){
-        var merged=data.customers.slice();
-        local.forEach(function(li){if(!merged.find(function(di){return di.id===li.id;}))merged.push(li);});
-        lsSet('kw_custs',merged); return merged;
-      });
-    }
-    if(data.items && data.items.length){
-      _setItems(function(local){
-        var merged=data.items.slice();
-        local.forEach(function(li){if(!merged.find(function(di){return di.id===li.id;}))merged.push(li);});
-        lsSet('kw_items',merged); return merged;
-      });
-    }
-    if(data.rates) { _setRates(data.rates); lsSet('kw_rates',data.rates); }
-    if(data.invS)  { _setInvS(data.invS);   lsSet('kw_invS',data.invS);  }
   }
   var NAV=[{id:'dashboard',icon:'\uD83D\uDCCA',lbl:'Dashboard'},{id:'customers',icon:'\uD83D\uDC64',lbl:'Customers'},{id:'items',icon:'\uD83D\uDCE6',lbl:'Item Master'},{id:'rates',icon:'\uD83D\uDCB2',lbl:'Cust. Rates'},{id:'newInvoice',icon:'\u2795',lbl:'New Invoice'},{id:'invoices',icon:'\uD83D\uDCC4',lbl:'Invoices'},{id:'invSettings',icon:'\u2699\uFE0F',lbl:'Inv. Series'},{id:'sync',icon:'\u2601\uFE0F',lbl:'Drive Sync'},{id:'backup',icon:'\uD83D\uDDAB',lbl:'Backup'}];
   return h('div',{className:'app'},
@@ -1380,17 +1189,18 @@ function App(){
       h('div',{className:'sidebar-footer'},'Krazy Wholesale LLC')
     ),
     h('div',{className:'main'},
-      syncStatus==='loading'&&h('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',marginBottom:14,background:'rgba(0,229,160,.07)',border:'1px solid rgba(0,229,160,.2)',borderRadius:8,fontSize:12,color:'var(--acc)'}},h('span',null,'\u23F3'),h('span',null,'Loading your data from Google Drive...')),
-      syncStatus==='loaded'&&h('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',marginBottom:14,background:'rgba(0,229,160,.07)',border:'1px solid rgba(0,229,160,.2)',borderRadius:8,fontSize:12,color:'var(--acc)'}},h('span',null,'\u2705'),h('span',null,'Data loaded from Google Drive'),h('button',{style:{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',fontSize:16,color:'var(--txt3)'},onClick:function(){setSyncStatus('idle');}},h('span',null,'\xD7'))),
-      syncStatus==='error'&&h('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',marginBottom:14,background:'rgba(255,77,109,.07)',border:'1px solid rgba(255,77,109,.2)',borderRadius:8,fontSize:12,color:'var(--danger)'}},h('span',null,'\u26A0\uFE0F'),h('span',null,'Could not load from Drive. Showing local data.'),h('button',{style:{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',fontSize:16,color:'var(--txt3)'},onClick:function(){setSyncStatus('idle');}},h('span',null,'\xD7'))),
+      toast&&h('div',{style:{position:'fixed',top:16,right:16,zIndex:9999,padding:'12px 18px',borderRadius:10,fontSize:13,fontWeight:500,background:toast.type==='ok'?'#00c589':toast.type==='warn'?'#ff9c3a':'#3a9bff',color:'#fff',boxShadow:'0 4px 20px rgba(0,0,0,.35)',maxWidth:340,lineHeight:'1.6'}},toast.msg),
+      (syncStatus==='loading')&&h('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',marginBottom:14,background:'rgba(0,229,160,.07)',border:'1px solid rgba(0,229,160,.2)',borderRadius:8,fontSize:12,color:'var(--acc)'}},h('span',null,'⏳'),h('span',null,'Loading data from Google Drive...')),
+      (syncStatus.indexOf('loaded')===0)&&h('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',marginBottom:14,background:'rgba(0,229,160,.07)',border:'1px solid rgba(0,229,160,.2)',borderRadius:8,fontSize:12,color:'var(--acc)'}},h('span',null,'✅'),h('span',null,'Loaded '+syncStatus.split(':')[1]+' invoices from Google Drive'),h('button',{style:{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',fontSize:16,color:'var(--txt3)'},onClick:function(){setSyncStatus('idle');}},'×')),
+      (syncStatus==='error')&&h('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',marginBottom:14,background:'rgba(255,77,109,.07)',border:'1px solid rgba(255,77,109,.2)',borderRadius:8,fontSize:12,color:'var(--danger)'}},h('span',null,'⚠️'),h('span',null,'Could not load from Drive. Showing local data.'),h('button',{style:{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',fontSize:16,color:'var(--txt3)'},onClick:function(){setSyncStatus('idle');}},'×')),
       page==='dashboard'  &&h(Dashboard,{custs:custs,items:items,invoices:invoices,setPage:setPage}),
       page==='customers'  &&h(Customers,{custs:custs,setCusts:setCusts}),
       page==='items'      &&h(Items,{items:items,setItems:setItems}),
       page==='rates'      &&h(CustRates,{custs:custs,items:items,rates:rates,setRates:setRates}),
-      page==='newInvoice' &&h(NewInvoice,{custs:custs,items:items,rates:rates,invoices:invoices,setInvoices:setInvoices,setPage:setPage,invS:invS,setInvS:setInvS}),
-      page==='invoices'   &&h(InvoiceList,{invoices:invoices,setInvoices:setInvoices}),
+      (page==='newInvoice'||page==='editInvoice')&&h(NewInvoice,{custs:custs,items:items,rates:rates,invoices:invoices,setInvoices:setInvoices,setPage:setPage,invS:invS,setInvS:setInvS,setToast:setToast,editInv:editInv,setEditInv:setEditInv}),
+      page==='invoices'   &&h(InvoiceList,{invoices:invoices,setInvoices:setInvoices,setPage:setPage,setEditInv:setEditInv}),
       page==='invSettings'&&h(InvSeries,{invS:invS,setInvS:setInvS}),
-      page==='sync'       &&h(DriveSync,{invoices:invoices,custs:custs,items:items,rates:rates,invS:invS,setInvoices:setInvoices,setCusts:setCusts,setItems:setItems,setRates:setRates,setInvS:setInvS}),
+      page==='sync'       &&h(DriveSync,{invoices:invoices}),
       page==='backup'     &&h(Backup,{custs:custs,items:items,rates:rates,invoices:invoices,invS:invS,setCusts:setCusts,setItems:setItems,setRates:setRates,setInvoices:setInvoices,setInvS:setInvS})
     )
   );
