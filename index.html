@@ -213,73 +213,175 @@ function pkce_challenge(v){return crypto.subtle.digest('SHA-256',new TextEncoder
 
 // Google Drive PKCE
 var GDrive=(function(){
-  function isValid(){return!!localStorage.getItem('gd_tok')&&Date.now()<parseInt(localStorage.getItem('gd_exp')||0);}
-  function clear(){['gd_tok','gd_exp','gd_ref'].forEach(function(k){localStorage.removeItem(k);});}
+  var TOK='gd_tok', EXP='gd_exp', REF='gd_ref', CID='gd_cid';
+
+  function isValid(){
+    var tok=localStorage.getItem(TOK);
+    var exp=parseInt(localStorage.getItem(EXP)||'0');
+    return !!tok && tok.length>10 && Date.now()<exp;
+  }
+
+  function saveTok(d){
+    if(!d.access_token)return false;
+    localStorage.setItem(TOK, d.access_token);
+    localStorage.setItem(EXP, String(Date.now()+(parseInt(d.expires_in)||3599)*1000-120000));
+    if(d.refresh_token) localStorage.setItem(REF, d.refresh_token);
+    return true;
+  }
+
+  function clear(){
+    [TOK,EXP,REF,'gd_mid','gd_data_fid','gd_folder'].forEach(function(k){localStorage.removeItem(k);});
+  }
+
+  function refresh(cb){
+    var cid=localStorage.getItem(CID), ref=localStorage.getItem(REF);
+    if(!cid||!ref){ cb(null,'No refresh token — please sign in again'); return; }
+    fetch('https://oauth2.googleapis.com/token',{
+      method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'grant_type=refresh_token&client_id='+encodeURIComponent(cid)+'&refresh_token='+encodeURIComponent(ref)
+    }).then(function(r){return r.json();}).then(function(d){
+      if(saveTok(d)){ cb(d.access_token,null); }
+      else { clear(); cb(null, d.error_description||d.error||'Refresh failed — please sign in again'); }
+    }).catch(function(e){ cb(null,e.message); });
+  }
+
+  function exchangePKCE(cid,code,redir,ver,cb){
+    fetch('https://oauth2.googleapis.com/token',{
+      method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'grant_type=authorization_code&client_id='+encodeURIComponent(cid)
+        +'&code='+encodeURIComponent(code)+'&redirect_uri='+encodeURIComponent(redir)
+        +'&code_verifier='+encodeURIComponent(ver)
+    }).then(function(r){return r.json();}).then(function(d){
+      if(saveTok(d)){ cb(d.access_token,null); }
+      else { cb(null, d.error_description||d.error||'Token exchange failed'); }
+    }).catch(function(e){ cb(null,e.message); });
+  }
+
   function doAuth(clientId,cb){
-    var ver=pkce_random(64),state=pkce_random(16);
-    sessionStorage.setItem('pkce_v_'+state,ver);sessionStorage.setItem('pkce_p_'+state,'google');
+    localStorage.setItem(CID, clientId);
+    var ver=pkce_random(64), state=pkce_random(16);
+    sessionStorage.setItem('pkce_v_'+state,ver);
+    sessionStorage.setItem('pkce_p_'+state,'google');
     var redir=window.location.origin+window.location.pathname;
     pkce_challenge(ver).then(function(ch){
-      var url='https://accounts.google.com/o/oauth2/v2/auth?client_id='+encodeURIComponent(clientId)+'&redirect_uri='+encodeURIComponent(redir)+'&response_type=code&scope='+encodeURIComponent('https://www.googleapis.com/auth/drive.file')+'&code_challenge='+ch+'&code_challenge_method=S256&state='+state+'&access_type=offline&prompt=consent';
-      var pop=null;try{pop=window.open(url,'gdauth','width=500,height=640,scrollbars=yes');}catch(e){}
-      if(!pop||pop.closed||typeof pop.closed==='undefined'){window.location.href=url;return;}
+      var url='https://accounts.google.com/o/oauth2/v2/auth'
+        +'?client_id='+encodeURIComponent(clientId)
+        +'&redirect_uri='+encodeURIComponent(redir)
+        +'&response_type=code'
+        +'&scope='+encodeURIComponent('https://www.googleapis.com/auth/drive.file')
+        +'&code_challenge='+ch+'&code_challenge_method=S256'
+        +'&state='+state+'&access_type=offline&prompt=consent';
+      var pop=null;
+      try{ pop=window.open(url,'gdauth','width=500,height=640,scrollbars=yes'); }catch(e){}
+      if(!pop||pop.closed||typeof pop.closed==='undefined'){
+        // Mobile: full-page redirect
+        window.location.href=url; return;
+      }
       var iv=setInterval(function(){
-        try{var href=pop.location.href;
-          if(href&&href.indexOf(redir)===0){clearInterval(iv);pop.close();
-            var u=new URL(href),code=u.searchParams.get('code'),err=u.searchParams.get('error');
+        try{
+          var href=pop.location.href;
+          if(href&&href.indexOf(redir)===0){
+            clearInterval(iv); pop.close();
+            var u=new URL(href);
+            var code=u.searchParams.get('code'), err=u.searchParams.get('error');
             if(err){cb(null,'Auth denied: '+err);return;}
-            if(code){exchangeG(clientId,code,redir,ver,cb);}
+            if(code){
+              var v=sessionStorage.getItem('pkce_v_'+state)||ver;
+              sessionStorage.removeItem('pkce_v_'+state);
+              sessionStorage.removeItem('pkce_p_'+state);
+              exchangePKCE(clientId,code,redir,v,cb);
+            }
           }
         }catch(e){}
       },500);
       setTimeout(function(){clearInterval(iv);if(!pop.closed)pop.close();},300000);
     });
   }
-  function exchangeG(cid,code,redir,ver,cb){
-    fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body:'grant_type=authorization_code&client_id='+encodeURIComponent(cid)+'&code='+encodeURIComponent(code)+'&redirect_uri='+encodeURIComponent(redir)+'&code_verifier='+encodeURIComponent(ver)})
-    .then(function(r){return r.json();}).then(function(d){
-      if(d.access_token){localStorage.setItem('gd_tok',d.access_token);localStorage.setItem('gd_exp',String(Date.now()+(parseInt(d.expires_in)||3600)*1000-60000));if(d.refresh_token)localStorage.setItem('gd_ref',d.refresh_token);cb(d.access_token,null);}
-      else cb(null,d.error_description||d.error||'Token exchange failed');
-    }).catch(function(e){cb(null,e.message);});
-  }
-  function refreshG(cb){
-    var cid=localStorage.getItem('gd_cid'),ref=localStorage.getItem('gd_ref');
-    if(!cid||!ref){cb(null,'No refresh token');return;}
-    fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=refresh_token&client_id='+encodeURIComponent(cid)+'&refresh_token='+encodeURIComponent(ref)})
-    .then(function(r){return r.json();}).then(function(d){
-      if(d.access_token){localStorage.setItem('gd_tok',d.access_token);localStorage.setItem('gd_exp',String(Date.now()+(parseInt(d.expires_in)||3600)*1000-60000));cb(d.access_token,null);}
-      else{clear();cb(null,d.error||'Refresh failed');}
-    }).catch(function(e){cb(null,e.message);});
-  }
+
+  // Get a valid token — auto-refresh if expired
   function getToken(clientId,cb){
-    if(isValid()){cb(localStorage.getItem('gd_tok'),null);return;}
-    var ref=localStorage.getItem('gd_ref');
-    if(ref){refreshG(cb);return;}
+    // 1. Token valid → use it
+    if(isValid()){ cb(localStorage.getItem(TOK),null); return; }
+    // 2. Have refresh token → refresh silently
+    var ref=localStorage.getItem(REF);
+    if(ref){ refresh(function(tok,err){ if(tok){cb(tok,null);}else{doAuth(clientId,cb);} }); return; }
+    // 3. No token at all → sign in
     doAuth(clientId,cb);
   }
-  function folder(name,tok){
-    return fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent("name='"+name.replace(/'/g,"\\'")+"' and mimeType='application/vnd.google-apps.folder' and trashed=false")+'&fields=files(id)',{headers:{Authorization:'Bearer '+tok}})
-      .then(function(r){return r.json();}).then(function(r){
-        if(r.files&&r.files.length)return r.files[0];
-        return fetch('https://www.googleapis.com/drive/v3/files?fields=id',{method:'POST',headers:{Authorization:'Bearer '+tok,'Content-Type':'application/json'},body:JSON.stringify({name:name,mimeType:'application/vnd.google-apps.folder'})}).then(function(r){return r.json();});
-      });
+
+  // Find or create a Drive folder
+  function getFolder(name,tok,cb){
+    var q="name='"+name.replace(/'/g,"\'"+"' and mimeType='application/vnd.google-apps.folder' and trashed=false");
+    // Fix: properly close the query string
+    q="name='"+name.replace(/'/g,"\'")+"' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+    fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id)',
+      {headers:{Authorization:'Bearer '+tok}})
+    .then(function(r){return r.json();})
+    .then(function(r){
+      if(r.files&&r.files.length){cb(null,r.files[0].id);return;}
+      fetch('https://www.googleapis.com/drive/v3/files?fields=id',{
+        method:'POST',
+        headers:{Authorization:'Bearer '+tok,'Content-Type':'application/json'},
+        body:JSON.stringify({name:name,mimeType:'application/vnd.google-apps.folder'})
+      }).then(function(r){return r.json();}).then(function(f){cb(null,f.id);}).catch(function(e){cb(e.message);});
+    }).catch(function(e){cb(e.message);});
   }
+
+  // Upload a file (multipart)
   function upload(tok,folderName,filename,b64,mime,existId,cb){
-    var bin=atob(b64),bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    var bin=atob(b64), bytes=new Uint8Array(bin.length);
+    for(var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
     function doUp(parentId){
-      var bnd='KWb';var meta=JSON.stringify(existId?{name:filename,mimeType:mime}:{name:filename,mimeType:mime,parents:parentId?[parentId]:[]});
+      var bnd='KWb';
+      var meta=JSON.stringify(existId
+        ?{name:filename,mimeType:mime}
+        :{name:filename,mimeType:mime,parents:parentId?[parentId]:[]});
       var pre=new TextEncoder().encode('--'+bnd+'\r\nContent-Type: application/json\r\n\r\n'+meta+'\r\n--'+bnd+'\r\nContent-Type: '+mime+'\r\n\r\n');
       var post=new TextEncoder().encode('\r\n--'+bnd+'--');
-      var body=new Uint8Array(pre.length+bytes.length+post.length);body.set(pre);body.set(bytes,pre.length);body.set(post,pre.length+bytes.length);
-      fetch((existId?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,name':'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name'),
-        {method:existId?'PATCH':'POST',headers:{Authorization:'Bearer '+tok,'Content-Type':'multipart/related; boundary='+bnd},body:body.buffer})
-        .then(function(r){return r.json();}).then(function(r){cb(r&&r.id?null:(r.error&&r.error.message)||'Upload failed',r&&r.id);}).catch(function(e){cb(e.message);});
+      var body=new Uint8Array(pre.length+bytes.length+post.length);
+      body.set(pre); body.set(bytes,pre.length); body.set(post,pre.length+bytes.length);
+      var url=existId
+        ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,name'
+        :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name';
+      fetch(url,{method:existId?'PATCH':'POST',
+        headers:{Authorization:'Bearer '+tok,'Content-Type':'multipart/related; boundary='+bnd},
+        body:body.buffer})
+      .then(function(r){return r.json();})
+      .then(function(r){cb(r&&r.id?null:(r.error&&r.error.message)||'Upload failed',r&&r.id);})
+      .catch(function(e){cb(e.message);});
     }
     if(!folderName){doUp(null);return;}
-    folder(folderName,tok).then(function(f){doUp(f?f.id:null);}).catch(function(e){cb(e.message);});
+    getFolder(folderName,tok,function(err,fid){doUp(err?null:fid);});
   }
-  return{isValid:isValid,getToken:getToken,upload:upload,clear:clear};
+
+  // Upload JSON data
+  function uploadJSON(tok,filename,obj,existId,cb){
+    var json=JSON.stringify(obj);
+    var bytes=new TextEncoder().encode(json);
+    var b64=btoa(String.fromCharCode.apply(null,bytes));
+    upload(tok,null,filename,b64,'application/json',existId,cb);
+  }
+
+  // Download JSON by file ID
+  function downloadJSON(tok,fileId,cb){
+    fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media',
+      {headers:{Authorization:'Bearer '+tok}})
+    .then(function(r){if(!r.ok){cb('HTTP '+r.status);return r.text();}return r.text();})
+    .then(function(t){if(!t){cb('Empty');return;}try{cb(null,JSON.parse(t));}catch(e){cb('Parse error: '+e.message);}})
+    .catch(function(e){cb(e.message);});
+  }
+
+  // Find a file by name anywhere in Drive
+  function findFile(tok,folderName,filename,cb){
+    var q="name='"+filename+"' and trashed=false";
+    fetch('https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent(q)+'&fields=files(id,name,modifiedTime)&orderBy=modifiedTime+desc',
+      {headers:{Authorization:'Bearer '+tok}})
+    .then(function(r){return r.json();})
+    .then(function(r){cb(null,r.files&&r.files.length?r.files[0]:null);})
+    .catch(function(e){cb(e.message);});
+  }
+
+  return{isValid:isValid,getToken:getToken,upload:upload,uploadJSON:uploadJSON,downloadJSON:downloadJSON,findFile:findFile,clear:clear};
 })();
 
 // OneDrive PKCE
