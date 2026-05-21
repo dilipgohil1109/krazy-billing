@@ -477,81 +477,94 @@ function Dashboard(p){
 }
 
 function Customers(p){
-  // Single atomic state for the modal - no stale closure issues
-  var M=useState(null),modal=M[0],setModal=M[1];
-  // modal = null (closed) | {mode:'add',id:null,data:{...}} | {mode:'edit',id:X,data:{...}}
+  var _show=useState(false), show=_show[0], setShow=_show[1];
+  var _editId=useState(''), editId=_editId[0], setEditId=_editId[1];
+  var _bn=useState(''), bn=_bn[0], setBn=_bn[1];
+  var _addr=useState(''), addr=_addr[0], setAddr=_addr[1];
+  var _con=useState(''), con=_con[0], setCon=_con[1];
+  var _ph=useState(''), ph=_ph[0], setPh=_ph[1];
 
   function openAdd(){
-    setModal({mode:'add',id:null,data:{businessName:'',address:'',contactName:'',phone:''}});
+    setEditId(''); setBn(''); setAddr(''); setCon(''); setPh(''); setShow(true);
   }
   function openEdit(cust){
-    setModal({mode:'edit',id:cust.id,data:{businessName:cust.businessName,address:cust.address,contactName:cust.contactName,phone:cust.phone}});
+    setEditId(String(cust.id));
+    setBn(cust.businessName||'');
+    setAddr(cust.address||'');
+    setCon(cust.contactName||'');
+    setPh(cust.phone||'');
+    setShow(true);
   }
-  function closeModal(){ setModal(null); }
-
-  function setField(k,v){
-    setModal(function(m){
-      if(!m)return m;
-      return {mode:m.mode,id:m.id,data:Object.assign({},m.data,{[k]:v})};
-    });
-  }
+  function close(){ setShow(false); }
 
   function save(){
-    if(!modal||!modal.data.businessName.trim())return;
-    var data=modal.data; // captured from current modal state — always fresh
-    var editId=modal.id; // captured from current modal state — always fresh
-    if(editId!==null){
-      // EDIT: replace the matching customer
+    if(!bn.trim()) return;
+    if(editId){
+      // Edit — find by string comparison of id
       p.setCusts(function(cs){
-        return cs.map(function(cust){
-          // Use == (not ===) to handle string/number id mismatch after Drive sync
-          // eslint-disable-next-line eqeqeq
-          return cust.id==editId
-            ? {id:cust.id,businessName:data.businessName,address:data.address,contactName:data.contactName,phone:data.phone}
-            : cust;
+        return cs.map(function(x){
+          return String(x.id)===editId
+            ? {id:x.id, businessName:bn, address:addr, contactName:con, phone:ph}
+            : x;
         });
       });
     } else {
-      // ADD: append a new customer with a unique timestamp id
-      var newId=Date.now();
+      // Add — use random string as ID, impossible to collide
+      var newId = Math.random().toString(36).slice(2)+Date.now().toString(36);
       p.setCusts(function(cs){
-        var safeId=newId;
-        while(cs.find(function(x){return x.id===safeId;})) safeId++;
-        return cs.concat([{id:safeId,businessName:data.businessName,address:data.address,contactName:data.contactName,phone:data.phone}]);
+        return cs.concat([{id:newId, businessName:bn, address:addr, contactName:con, phone:ph}]);
       });
     }
-    setModal(null);
+    setShow(false);
   }
 
   function del(id){
     if(confirm('Remove this customer?')){
-      p.setCusts(function(cs){return cs.filter(function(cust){return cust.id!=id;});});
+      p.setCusts(function(cs){ return cs.filter(function(x){ return String(x.id)!==String(id); }); });
     }
   }
 
-  var show=!!modal;
-  var form=modal?modal.data:{businessName:'',address:'',contactName:'',phone:''};
-  var eid=modal?modal.id:null;
   return h('div',null,
     h('div',{className:'page-hdr'},h('h2',null,'Customer Master')),
     h('div',{className:'card'},
-      h('div',{className:'card-header'},h('h3',null,'Customers ('+p.custs.length+')'),h('button',{className:'btn btn-primary',onClick:openAdd},'\u2795 Add')),
-      p.custs.length===0?h('div',{className:'empty'},h('div',{className:'icon'},'\uD83D\uDC64'),h('p',null,'No customers')):
-      h('div',{className:'tbl-wrap'},h('table',null,
-        h('thead',null,h('tr',null,h('th',null,'#'),h('th',null,'Business'),h('th',null,'Contact'),h('th',null,'Phone'),h('th',null,''))),
-        h('tbody',null,p.custs.map(function(c,i){return h('tr',{key:c.id},
-          h('td',null,h('span',{className:'tag'},i+1)),h('td',null,h('strong',null,c.businessName)),h('td',null,c.contactName),h('td',null,c.phone),
-          h('td',null,h('div',{className:'fr'},h('button',{className:'btn btn-sm btn-secondary',onClick:function(){openEdit(c);}},'\u270F\uFE0F'),h('button',{className:'btn btn-sm btn-danger',onClick:function(){del(c.id);}},'\uD83D\uDDD1\uFE0F')))
-        );}))
-      ))
+      h('div',{className:'card-header'},
+        h('h3',null,'Customers ('+p.custs.length+')'),
+        h('button',{className:'btn btn-primary',onClick:openAdd},'➕ Add Customer')
+      ),
+      p.custs.length===0
+        ? h('div',{className:'empty'},h('div',{className:'icon'},'👤'),h('p',null,'No customers yet'))
+        : h('div',{className:'tbl-wrap'},h('table',null,
+            h('thead',null,h('tr',null,h('th',null,'#'),h('th',null,'Business'),h('th',null,'Contact'),h('th',null,'Phone'),h('th',null,''))),
+            h('tbody',null,p.custs.map(function(cust,i){
+              return h('tr',{key:String(cust.id)},
+                h('td',null,h('span',{className:'tag'},i+1)),
+                h('td',null,h('strong',null,cust.businessName)),
+                h('td',null,cust.contactName),
+                h('td',null,cust.phone),
+                h('td',null,h('div',{className:'fr'},
+                  h('button',{className:'btn btn-sm btn-secondary',onClick:function(){ openEdit(cust); }},'✏️'),
+                  h('button',{className:'btn btn-sm btn-danger',onClick:function(){ del(cust.id); }},'🗑️')
+                ))
+              );
+            }))
+          ))
     ),
-    show&&h('div',{className:'modal-bg',onClick:function(e){if(e.target===e.currentTarget)closeModal();}},
+    show && h('div',{className:'modal-bg',onClick:function(e){ if(e.target===e.currentTarget) close(); }},
       h('div',{className:'modal'},
-        h('div',{className:'modal-hdr'},h('h3',null,eid?'Edit Customer':'Add Customer'),h('button',{className:'xbtn',onClick:closeModal},'\xD7')),
-        h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Business Name *'),h('input',{value:form.businessName,onChange:function(e){setField('businessName',e.target.value);}}))),
-        h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Address'),h('textarea',{value:form.address,onChange:function(e){setField('address',e.target.value);}}))),
-        h('div',{className:'form-row c2'},h('div',{className:'fg'},h('label',null,'Contact'),h('input',{value:form.contactName,onChange:function(e){setField('contactName',e.target.value);}})),h('div',{className:'fg'},h('label',null,'Phone'),h('input',{value:form.phone,onChange:function(e){setField('phone',e.target.value);}}))),
-        h('div',{className:'modal-foot'},h('button',{className:'btn btn-secondary',onClick:closeModal},'\u274C'),h('button',{className:'btn btn-primary',onClick:save},eid?'Save':'Add'))
+        h('div',{className:'modal-hdr'},
+          h('h3',null, editId ? 'Edit Customer' : 'Add Customer'),
+          h('button',{className:'xbtn',onClick:close},'×')
+        ),
+        h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Business Name *'),h('input',{value:bn,onChange:function(e){setBn(e.target.value);}}))),
+        h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Address'),h('textarea',{value:addr,onChange:function(e){setAddr(e.target.value);}}))),
+        h('div',{className:'form-row c2'},
+          h('div',{className:'fg'},h('label',null,'Contact'),h('input',{value:con,onChange:function(e){setCon(e.target.value);}})),
+          h('div',{className:'fg'},h('label',null,'Phone'),h('input',{value:ph,onChange:function(e){setPh(e.target.value);}}))
+        ),
+        h('div',{className:'modal-foot'},
+          h('button',{className:'btn btn-secondary',onClick:close},'❌ Cancel'),
+          h('button',{className:'btn btn-primary',onClick:save}, editId ? 'Save Changes' : 'Add Customer')
+        )
       )
     )
   );
