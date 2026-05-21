@@ -504,8 +504,10 @@ function Customers(p){
       // EDIT: replace the matching customer
       p.setCusts(function(cs){
         return cs.map(function(cust){
-          return cust.id===editId
-            ? {id:editId,businessName:data.businessName,address:data.address,contactName:data.contactName,phone:data.phone}
+          // Use == (not ===) to handle string/number id mismatch after Drive sync
+          // eslint-disable-next-line eqeqeq
+          return cust.id==editId
+            ? {id:cust.id,businessName:data.businessName,address:data.address,contactName:data.contactName,phone:data.phone}
             : cust;
         });
       });
@@ -523,7 +525,7 @@ function Customers(p){
 
   function del(id){
     if(confirm('Remove this customer?')){
-      p.setCusts(function(cs){return cs.filter(function(cust){return cust.id!==id;});});
+      p.setCusts(function(cs){return cs.filter(function(cust){return cust.id!=id;});});
     }
   }
 
@@ -567,8 +569,8 @@ function Items(p){
   var disp=tab==='all'?p.items:p.items.filter(function(i){return i.category===tab;});
   function openAdd(){setEid(null);setMode('single');setForm({name:'',defaultRate:'',category:tab==='nontaxable'?'nontaxable':'taxable'});setPt('');setPr([]);setShow(true);}
   function openEdit(it){setEid(it.id);setMode('single');setForm({name:it.name,defaultRate:String(it.defaultRate),category:it.category});setShow(true);}
-  function saveSingle(){if(!form.name.trim())return;var item={name:form.name.trim(),defaultRate:parseFloat(form.defaultRate)||0,category:form.category};if(eid)p.setItems(function(its){return its.map(function(i){return i.id===eid?Object.assign({},item,{id:eid}):i;});});else{var id=NIid++;p.setItems(function(its){return its.concat([Object.assign({},item,{id:id})]);});}setShow(false);}
-  function del(id){if(confirm('Remove?'))p.setItems(function(its){return its.filter(function(i){return i.id!==id;});});}
+  function saveSingle(){if(!form.name.trim())return;var item={name:form.name.trim(),defaultRate:parseFloat(form.defaultRate)||0,category:form.category};if(eid)p.setItems(function(its){return its.map(function(i){return i.id==eid?Object.assign({},item,{id:i.id}):i;});});else{var id=NIid++;p.setItems(function(its){return its.concat([Object.assign({},item,{id:id})]);});}setShow(false);}
+  function del(id){if(confirm('Remove?'))p.setItems(function(its){return its.filter(function(i){return i.id!=id;});});}
   function fi(k,v){setForm(function(f){var o=Object.assign({},f);o[k]=v;return o;});}
   function parsePaste(text){if(!text.trim()){setPr([]);return;}
     var rows=text.split('\n').map(function(l){return l.trim();}).filter(Boolean).map(function(line){
@@ -645,7 +647,7 @@ function Items(p){
 function CustRates(p){
   var S=useState(p.custs.length?String(p.custs[0].id):''),sel=S[0],setSel=S[1];
   var _search=useState(''),search=_search[0],setSearch=_search[1];
-  var cust=p.custs.find(function(c){return String(c.id)===sel;});
+  var cust=p.custs.find(function(c){return String(c.id)===String(sel);});
   // Show ALL items (both taxable and non-taxable)
   var allItems=p.items.filter(function(it){
     if(!search.trim()) return true;
@@ -890,7 +892,7 @@ function NewInvoice(p){
     };
     var newInvoices;
     if(ei){
-      newInvoices=p.invoices.map(function(x){return x.id===inv.id?inv:x;});
+      newInvoices=p.invoices.map(function(x){return x.id==inv.id?inv:x;});
       p.setInvoices(newInvoices);
       if(p.setEditInv)p.setEditInv(null);
     } else {
@@ -987,7 +989,7 @@ function NewInvoice(p){
 
 function InvoiceList(p){
   var V=useState(null),viewing=V[0],setViewing=V[1];
-  function del(id){if(confirm('Delete?'))p.setInvoices(function(is){return is.filter(function(i){return i.id!==id;});});}
+  function del(id){if(confirm('Delete?'))p.setInvoices(function(is){return is.filter(function(i){return i.id!=id;});});}
   return h('div',null,
     h('div',{className:'page-hdr'},h('h2',null,'Invoices')),
     h('div',{className:'card'},
@@ -1569,7 +1571,16 @@ function App(){
   function setInvS(v){var val=typeof v==='function'?v(invS):v;_setInvS(val);lsSet('kw_invS',val);scheduleSync();}
 
   function applyDriveData(data){
-    function mergeById(local,drive){var m={};local.forEach(function(x){m[x.id]=x;});drive.forEach(function(x){m[x.id]=x;});return Object.keys(m).map(function(k){return m[k];}).sort(function(a,b){return a.id-b.id;});}
+    function mergeById(local,drive){
+        var m={};
+        local.forEach(function(x){m[x.id]=x;});
+        drive.forEach(function(x){m[x.id]=x;});
+        // Use Object.values() to preserve original id type (number not string)
+        return Object.values(m).sort(function(a,b){
+          // numeric sort even if ids are strings
+          return (parseFloat(a.id)||0)-(parseFloat(b.id)||0);
+        });
+      }
     var merged=mergeById(JSON.parse(localStorage.getItem('kw_invoices')||'[]'),data.invoices||[]);
     _setInvoices(merged);lsSet('kw_invoices',merged);
     var mc=mergeById(JSON.parse(localStorage.getItem('kw_custs')||'[]'),data.customers||[]);
