@@ -482,7 +482,23 @@ function Customers(p){
   var F=useState({businessName:'',address:'',contactName:'',phone:''}),form=F[0],setForm=F[1];
   function openAdd(){setEid(null);setForm({businessName:'',address:'',contactName:'',phone:''});setShow(true);}
   function openEdit(c){setEid(c.id);setForm({businessName:c.businessName,address:c.address,contactName:c.contactName,phone:c.phone});setShow(true);}
-  function save(){if(!form.businessName.trim())return;if(eid)p.setCusts(function(cs){return cs.map(function(c){return c.id===eid?Object.assign({},form,{id:eid}):c;});});else{var id=NCid++;p.setCusts(function(cs){return cs.concat([Object.assign({},form,{id:id})]);});}setShow(false);}
+  function save(){
+    if(!form.businessName.trim())return;
+    // Snapshot form values NOW to avoid stale closure issues
+    var snap={businessName:form.businessName,address:form.address,contactName:form.contactName,phone:form.phone};
+    if(eid){
+      p.setCusts(function(cs){return cs.map(function(c){return c.id===eid?Object.assign({},snap,{id:eid}):c;});});
+    } else {
+      // Generate id synchronously and pass it into the updater
+      var newId=Date.now(); // use timestamp for truly unique IDs — no collision possible
+      p.setCusts(function(cs){
+        // Extra guard: make sure this id doesn't already exist
+        if(cs.find(function(x){return x.id===newId;})) newId=newId+1;
+        return cs.concat([Object.assign({},snap,{id:newId})]);
+      });
+    }
+    setShow(false);
+  }
   function del(id){if(confirm('Remove?'))p.setCusts(function(cs){return cs.filter(function(c){return c.id!==id;});});}
   function fi(k,v){setForm(function(f){var o=Object.assign({},f);o[k]=v;return o;});}
   return h('div',null,
@@ -599,23 +615,109 @@ function Items(p){
 
 function CustRates(p){
   var S=useState(p.custs.length?String(p.custs[0].id):''),sel=S[0],setSel=S[1];
+  var _search=useState(''),search=_search[0],setSearch=_search[1];
   var cust=p.custs.find(function(c){return String(c.id)===sel;});
-  var taxItems=p.items.filter(function(i){return i.category==='taxable';});
-  function getR(cid,iid){var k=cid+'_'+iid;return p.rates[k]!==undefined?String(p.rates[k]):'';}
-  function setR(cid,iid,val){p.setRates(function(r){var o=Object.assign({},r),k=cid+'_'+iid;if(val==='')delete o[k];else o[k]=parseFloat(val)||0;return o;});}
+  // Show ALL items (both taxable and non-taxable)
+  var allItems=p.items.filter(function(it){
+    if(!search.trim()) return true;
+    return it.name.toLowerCase().indexOf(search.toLowerCase())>=0;
+  });
+  var taxItems=allItems.filter(function(i){return i.category==='taxable';});
+  var ntItems=allItems.filter(function(i){return i.category==='nontaxable';});
+
+  function getR(cid,iid){var k=cid+'_'+iid;return p.rates[k]!==undefined?String(p.rates[k])||'':'';}
+  function setR(cid,iid,val){p.setRates(function(r){var o=Object.assign({},r),k=cid+'_'+iid;if(val===''||val===null)delete o[k];else o[k]=parseFloat(val)||0;return o;});}
+  function hasCustom(cid,iid){return p.rates[cid+'_'+iid]!==undefined;}
+  function clearR(cid,iid){p.setRates(function(r){var o=Object.assign({},r);delete o[cid+'_'+iid];return o;});}
+
+  function RateRow(it){
+    var cid=String(cust.id);
+    var custom=hasCustom(cid,it.id);
+    return h('tr',{key:it.id,style:{background:custom?'rgba(0,229,160,.04)':''}},
+      h('td',null,
+        h('div',null,h('strong',null,it.name)),
+        h('div',{style:{fontSize:10,color:'var(--txt3)',marginTop:1}},it.category==='taxable'?'Taxable':'Non-Taxable')
+      ),
+      h('td',{style:{color:'var(--txt2)'}},fmt(it.defaultRate)),
+      h('td',null,
+        h('div',{style:{display:'flex',alignItems:'center',gap:6}},
+          h('input',{type:'number',step:'0.01',value:getR(cid,it.id),
+            placeholder:String(it.defaultRate),
+            onChange:function(e){setR(cid,it.id,e.target.value);},
+            style:{background:custom?'rgba(0,229,160,.07)':'var(--bg)',border:'1px solid '+(custom?'var(--acc)':'var(--brd)'),borderRadius:5,color:'var(--txt)',padding:'5px 8px',width:110,fontSize:12,outline:'none',fontWeight:custom?700:400}}),
+          custom&&h('button',{onClick:function(){clearR(cid,it.id);},
+            title:'Reset to default',
+            style:{background:'none',border:'none',cursor:'pointer',color:'var(--txt3)',fontSize:14,padding:'0 2px',lineHeight:1}},'×')
+        )
+      ),
+      h('td',null,custom
+        ?h('span',{className:'badge b-ok',style:{fontSize:10}},'✓ Custom')
+        :h('span',{style:{fontSize:10,color:'var(--txt3)'}},'Default')
+      )
+    );
+  }
+
+  // Count of custom rates for this customer
+  var custCount=cust?Object.keys(p.rates).filter(function(k){return k.indexOf(String(cust.id)+'_')===0;}).length:0;
+
   return h('div',null,
-    h('div',{className:'page-hdr'},h('h2',null,'Customer Rates'),h('p',null,'Custom taxable rates per customer')),
-    h('div',{className:'card',style:{marginBottom:14}},h('div',{className:'fg',style:{maxWidth:320}},h('label',null,'Select Customer'),h('select',{value:sel,onChange:function(e){setSel(e.target.value);}},h('option',{value:''},'-- Select --'),p.custs.map(function(c){return h('option',{key:c.id,value:String(c.id)},c.businessName);})))),
+    h('div',{className:'page-hdr'},h('h2',null,'Customer Rates'),h('p',null,'Set custom prices per item per customer')),
+
+    // Customer selector
+    h('div',{className:'card',style:{marginBottom:14}},
+      h('div',{style:{display:'flex',gap:12,alignItems:'flex-end',flexWrap:'wrap'}},
+        h('div',{className:'fg',style:{minWidth:240,flex:1}},
+          h('label',null,'Select Customer'),
+          h('select',{value:sel,onChange:function(e){setSel(e.target.value);setSearch('');}},
+            h('option',{value:''},'-- Select a customer --'),
+            p.custs.map(function(c){
+              var cnt=Object.keys(p.rates).filter(function(k){return k.indexOf(String(c.id)+'_')===0;}).length;
+              return h('option',{key:c.id,value:String(c.id)},c.businessName+(cnt?' ('+cnt+' custom)':''));
+            })
+          )
+        ),
+        cust&&h('div',{style:{fontSize:12,color:'var(--txt2)',paddingBottom:8}},
+          h('span',{style:{color:'var(--acc)',fontWeight:700}},custCount),
+          ' custom rate'+(custCount!==1?'s':'')+' set for ',
+          h('strong',null,cust.businessName)
+        )
+      )
+    ),
+
+    // Rates table
     cust&&h('div',{className:'card'},
-      h('div',{className:'card-header'},h('h3',null,'Rates for '+cust.businessName)),
-      h('p',{style:{fontSize:11,color:'var(--txt2)',marginBottom:12}},'Leave blank to use default rate.'),
-      h('div',{className:'tbl-wrap'},h('table',null,
-        h('thead',null,h('tr',null,h('th',null,'Item'),h('th',null,'Default'),h('th',null,'Custom Rate'))),
-        h('tbody',null,taxItems.map(function(it){return h('tr',{key:it.id},
-          h('td',null,h('strong',null,it.name)),h('td',{style:{color:'var(--txt2)'}},fmt(it.defaultRate)),
-          h('td',null,h('input',{type:'number',step:'0.01',value:getR(String(cust.id),it.id),placeholder:String(it.defaultRate),onChange:function(e){setR(String(cust.id),it.id,e.target.value);},style:{background:'var(--bg)',border:'1px solid var(--brd)',borderRadius:5,color:'var(--txt)',padding:'5px 8px',width:120,fontSize:12,outline:'none'}}))
-        );}))
-      ))
+      h('div',{className:'card-header'},
+        h('h3',null,'Item Rates for '+cust.businessName),
+        h('div',{className:'fg',style:{maxWidth:220,marginBottom:0}},
+          h('input',{value:search,onChange:function(e){setSearch(e.target.value);},
+            placeholder:'🔍 Search items...',style:{fontSize:12,padding:'6px 10px'}})
+        )
+      ),
+      h('p',{style:{fontSize:11,color:'var(--txt2)',marginBottom:12,lineHeight:1.7}},
+        'Set a custom price for any item. Leave blank to use the default. '
+        +h('span',{style:{color:'var(--acc)'}},'✓ Green')
+        +' = custom rate active. Click × to reset to default.'
+      ),
+
+      // Taxable items section
+      taxItems.length>0&&h('div',{style:{marginBottom:16}},
+        h('div',{style:{fontSize:10,fontWeight:700,color:'var(--acc2)',textTransform:'uppercase',letterSpacing:1,padding:'6px 0',borderBottom:'1px solid var(--brd)',marginBottom:8}},'Taxable Items ('+taxItems.length+')'),
+        h('div',{className:'tbl-wrap'},h('table',null,
+          h('thead',null,h('tr',null,h('th',null,'Item'),h('th',null,'Default Rate'),h('th',null,'Custom Rate'),h('th',null,'Status'))),
+          h('tbody',null,taxItems.map(function(it){return RateRow(it);}))
+        ))
+      ),
+
+      // Non-taxable items section
+      ntItems.length>0&&h('div',null,
+        h('div',{style:{fontSize:10,fontWeight:700,color:'var(--acc3)',textTransform:'uppercase',letterSpacing:1,padding:'6px 0',borderBottom:'1px solid var(--brd)',marginBottom:8}},'Non-Taxable Items ('+ntItems.length+')'),
+        h('div',{className:'tbl-wrap'},h('table',null,
+          h('thead',null,h('tr',null,h('th',null,'Item'),h('th',null,'Default Rate'),h('th',null,'Custom Rate'),h('th',null,'Status'))),
+          h('tbody',null,ntItems.map(function(it){return RateRow(it);}))
+        ))
+      ),
+
+      p.items.length===0&&h('div',{className:'empty'},h('p',null,'No items yet. Add items in Item Master first.'))
     )
   );
 }
@@ -681,14 +783,55 @@ function NewInvoice(p){
   var grand=sub+taxAmt;
   function distNT(){
     var tot=parseFloat(invTot);if(isNaN(tot)||tot<=0||!lines.length)return;
-    var sumQO=lines.reduce(function(s,l){return s+(parseFloat(l.qty)||1)*(parseFloat(l.origRate)||0);},0);if(!sumQO)return;
+
+    // Determine which lines are LOCKED (have a customer-specific rate)
+    // A line is locked if its origRate differs from the item's defaultRate
+    // because effRate() returns custRate when set, else defaultRate
+    function isLocked(l){
+      var item=p.items.find(function(it){return it.id===l.itemId;});
+      if(!item)return false;
+      var custKey=String(cust.id)+'_'+l.itemId;
+      return p.rates[custKey]!==undefined; // has a customer-specific rate → locked
+    }
+
+    var locked=lines.filter(function(l){return isLocked(l);});
+    var unlocked=lines.filter(function(l){return !isLocked(l);});
+
+    // Calculate how much is already consumed by locked lines (qty × their rate)
+    var lockedTotal=locked.reduce(function(s,l){return s+(parseFloat(l.qty)||1)*(parseFloat(l.rate)||0);},0);
+    var remaining=Math.round((tot-lockedTotal)*100)/100;
+
+    if(unlocked.length===0){
+      // All lines are locked — can't auto-distribute
+      return;
+    }
+    if(remaining<=0){
+      // Locked lines already consume the full total — zero out unlocked
+      var nl=lines.map(function(l){
+        if(isLocked(l))return l;
+        return Object.assign({},l,{rate:0});
+      });
+      setLines(nl);return;
+    }
+
+    // Distribute 'remaining' proportionally among unlocked lines only
+    var sumQO=unlocked.reduce(function(s,l){return s+(parseFloat(l.qty)||1)*(parseFloat(l.origRate)||0);},0);
+    if(!sumQO)return;
+
     var alloc=0;
-    var nl=lines.map(function(l,i){
+    var unlockedNew=unlocked.map(function(l,i){
       var qty=parseFloat(l.qty)||1;var orig=parseFloat(l.origRate)||0;
-      var share=i===lines.length-1?Math.round((tot-alloc)*100)/100:Math.round((qty*orig/sumQO)*tot*100)/100;
+      var share=i===unlocked.length-1
+        ?Math.round((remaining-alloc)*100)/100
+        :Math.round((qty*orig/sumQO)*remaining*100)/100;
       alloc+=share;
       return Object.assign({},l,{qty:qty,rate:Math.round((share/qty)*100)/100});
     });
+
+    // Rebuild full lines array preserving order
+    var unlockedMap={};
+    unlockedNew.forEach(function(l){unlockedMap[l.itemId]=l;});
+    var nl=lines.map(function(l){return isLocked(l)?l:(unlockedMap[l.itemId]||l);});
     setLines(nl);
   }
   function ntVal(){
