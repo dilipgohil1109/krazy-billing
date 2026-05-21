@@ -477,30 +477,59 @@ function Dashboard(p){
 }
 
 function Customers(p){
-  var S=useState(false),show=S[0],setShow=S[1];
-  var E=useState(null),eid=E[0],setEid=E[1];
-  var F=useState({businessName:'',address:'',contactName:'',phone:''}),form=F[0],setForm=F[1];
-  function openAdd(){setEid(null);setForm({businessName:'',address:'',contactName:'',phone:''});setShow(true);}
-  function openEdit(c){setEid(c.id);setForm({businessName:c.businessName,address:c.address,contactName:c.contactName,phone:c.phone});setShow(true);}
+  // Single atomic state for the modal - no stale closure issues
+  var M=useState(null),modal=M[0],setModal=M[1];
+  // modal = null (closed) | {mode:'add',id:null,data:{...}} | {mode:'edit',id:X,data:{...}}
+
+  function openAdd(){
+    setModal({mode:'add',id:null,data:{businessName:'',address:'',contactName:'',phone:''}});
+  }
+  function openEdit(cust){
+    setModal({mode:'edit',id:cust.id,data:{businessName:cust.businessName,address:cust.address,contactName:cust.contactName,phone:cust.phone}});
+  }
+  function closeModal(){ setModal(null); }
+
+  function setField(k,v){
+    setModal(function(m){
+      if(!m)return m;
+      return {mode:m.mode,id:m.id,data:Object.assign({},m.data,{[k]:v})};
+    });
+  }
+
   function save(){
-    if(!form.businessName.trim())return;
-    // Snapshot form values NOW to avoid stale closure issues
-    var snap={businessName:form.businessName,address:form.address,contactName:form.contactName,phone:form.phone};
-    if(eid){
-      p.setCusts(function(cs){return cs.map(function(c){return c.id===eid?Object.assign({},snap,{id:eid}):c;});});
-    } else {
-      // Generate id synchronously and pass it into the updater
-      var newId=Date.now(); // use timestamp for truly unique IDs — no collision possible
+    if(!modal||!modal.data.businessName.trim())return;
+    var data=modal.data; // captured from current modal state — always fresh
+    var editId=modal.id; // captured from current modal state — always fresh
+    if(editId!==null){
+      // EDIT: replace the matching customer
       p.setCusts(function(cs){
-        // Extra guard: make sure this id doesn't already exist
-        if(cs.find(function(x){return x.id===newId;})) newId=newId+1;
-        return cs.concat([Object.assign({},snap,{id:newId})]);
+        return cs.map(function(cust){
+          return cust.id===editId
+            ? {id:editId,businessName:data.businessName,address:data.address,contactName:data.contactName,phone:data.phone}
+            : cust;
+        });
+      });
+    } else {
+      // ADD: append a new customer with a unique timestamp id
+      var newId=Date.now();
+      p.setCusts(function(cs){
+        var safeId=newId;
+        while(cs.find(function(x){return x.id===safeId;})) safeId++;
+        return cs.concat([{id:safeId,businessName:data.businessName,address:data.address,contactName:data.contactName,phone:data.phone}]);
       });
     }
-    setShow(false);
+    setModal(null);
   }
-  function del(id){if(confirm('Remove?'))p.setCusts(function(cs){return cs.filter(function(c){return c.id!==id;});});}
-  function fi(k,v){setForm(function(f){var o=Object.assign({},f);o[k]=v;return o;});}
+
+  function del(id){
+    if(confirm('Remove this customer?')){
+      p.setCusts(function(cs){return cs.filter(function(cust){return cust.id!==id;});});
+    }
+  }
+
+  var show=!!modal;
+  var form=modal?modal.data:{businessName:'',address:'',contactName:'',phone:''};
+  var eid=modal?modal.id:null;
   return h('div',null,
     h('div',{className:'page-hdr'},h('h2',null,'Customer Master')),
     h('div',{className:'card'},
@@ -514,13 +543,13 @@ function Customers(p){
         );}))
       ))
     ),
-    show&&h('div',{className:'modal-bg',onClick:function(e){if(e.target===e.currentTarget)setShow(false);}},
+    show&&h('div',{className:'modal-bg',onClick:function(e){if(e.target===e.currentTarget)closeModal();}},
       h('div',{className:'modal'},
-        h('div',{className:'modal-hdr'},h('h3',null,eid?'Edit Customer':'Add Customer'),h('button',{className:'xbtn',onClick:function(){setShow(false);}},'\xD7')),
-        h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Business Name *'),h('input',{value:form.businessName,onChange:function(e){fi('businessName',e.target.value);}}))),
-        h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Address'),h('textarea',{value:form.address,onChange:function(e){fi('address',e.target.value);}}))),
-        h('div',{className:'form-row c2'},h('div',{className:'fg'},h('label',null,'Contact'),h('input',{value:form.contactName,onChange:function(e){fi('contactName',e.target.value);}})),h('div',{className:'fg'},h('label',null,'Phone'),h('input',{value:form.phone,onChange:function(e){fi('phone',e.target.value);}}))),
-        h('div',{className:'modal-foot'},h('button',{className:'btn btn-secondary',onClick:function(){setShow(false);}},'\u274C'),h('button',{className:'btn btn-primary',onClick:save},eid?'Save':'Add'))
+        h('div',{className:'modal-hdr'},h('h3',null,eid?'Edit Customer':'Add Customer'),h('button',{className:'xbtn',onClick:closeModal},'\xD7')),
+        h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Business Name *'),h('input',{value:form.businessName,onChange:function(e){setField('businessName',e.target.value);}}))),
+        h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Address'),h('textarea',{value:form.address,onChange:function(e){setField('address',e.target.value);}}))),
+        h('div',{className:'form-row c2'},h('div',{className:'fg'},h('label',null,'Contact'),h('input',{value:form.contactName,onChange:function(e){setField('contactName',e.target.value);}})),h('div',{className:'fg'},h('label',null,'Phone'),h('input',{value:form.phone,onChange:function(e){setField('phone',e.target.value);}}))),
+        h('div',{className:'modal-foot'},h('button',{className:'btn btn-secondary',onClick:closeModal},'\u274C'),h('button',{className:'btn btn-primary',onClick:save},eid?'Save':'Add'))
       )
     )
   );
