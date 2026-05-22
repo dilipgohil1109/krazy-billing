@@ -830,7 +830,7 @@ function NewInvoice(p){
   var IT=useState(ei?ei.type:'taxable'),invType=IT[0],setInvType=IT[1];
   var TX=useState(ei?String(ei.taxPct||0):'8.00'),taxPct=TX[0],setTaxPct=TX[1];
   var TT=useState(ei&&ei.type==='nontaxable'?String(ei.grandTotal):''),invTot=TT[0],setInvTot=TT[1];
-  var SI=useState(ei?ei.lineItems.map(function(l,i){return l.itemId||('ei_'+i);}):  []),selIds=SI[0],setSelIds=SI[1];
+  var SI=useState(ei?ei.lineItems.map(function(l,i){return String(l.itemId||('ei_'+i));}):  []),selIds=SI[0],setSelIds=SI[1];
   var LI=useState(ei?ei.lineItems.map(function(l,i){return Object.assign({},l,{itemId:l.itemId||('ei_'+i)});}): []),lines=LI[0],setLines=LI[1];
   var DT=useState(ei?ei.date:today()),invDate=DT[0],setInvDate=DT[1];
   var NN=useState(ei?ei.number:buildNo(p.invS)),invNum=NN[0],setInvNum=NN[1];
@@ -839,15 +839,23 @@ function NewInvoice(p){
   useEffect(function(){
     if(!cust)return;
     setLines(function(prev){return selIds.map(function(id){
-      var item=p.items.find(function(i){return i.id===id;});
-      var ex=prev.find(function(l){return l.itemId===id;});
+      var item=p.items.find(function(i){return String(i.id)===String(id);});
+      var ex=prev.find(function(l){return String(l.itemId)===String(id);});
       if(ex)return ex;
       var r=effRate(String(cust.id),item,p.rates);
       return{itemId:id,name:item.name,qty:1,rate:r,origRate:r};
     });});
   },[selIds]);
-  function toggle(id){setSelIds(function(ids){return ids.includes(id)?ids.filter(function(x){return x!==id;}):[].concat(ids,[id]);});}
-  function upL(id,f,v){setLines(function(ls){return ls.map(function(l){return l.itemId===id?Object.assign({},l,{[f]:v}):l;});});}
+  function toggle(id){
+    var sid=String(id);
+    setSelIds(function(ids){
+      var strIds=ids.map(function(x){return String(x);});
+      return strIds.includes(sid)
+        ? strIds.filter(function(x){return x!==sid;})
+        : strIds.concat([sid]);
+    });
+  }
+  function upL(id,f,v){setLines(function(ls){return ls.map(function(l){return String(l.itemId)===String(id)?Object.assign({},l,{[f]:v}):l;});});}
   var sub=lines.reduce(function(s,l){return s+(parseFloat(l.qty)||0)*(parseFloat(l.rate)||0);},0);
   var taxAmt=sub*(parseFloat(taxPct)||0)/100;
   var grand=sub+taxAmt;
@@ -981,7 +989,7 @@ function NewInvoice(p){
       h('div',{className:'tbl-wrap'},h('table',null,
         h('thead',null,h('tr',null,h('th',null,'\u2714'),h('th',null,'Item'),h('th',null,'Default'),h('th',null,'Cust. Rate'))),
         h('tbody',null,catItems.map(function(it){
-          var chk=selIds.includes(it.id),er=cust?effRate(String(cust.id),it,p.rates):it.defaultRate;
+          var chk=selIds.map(function(x){return String(x);}).includes(String(it.id)),er=cust?effRate(String(cust.id),it,p.rates):it.defaultRate;
           return h('tr',{key:it.id,onClick:function(){toggle(it.id);},style:{cursor:'pointer',background:chk?'rgba(0,229,160,.04)':''}},
             h('td',null,h('input',{type:'checkbox',checked:chk,readOnly:true})),
             h('td',null,h('strong',{style:{color:chk?'var(--acc)':'var(--txt)'}},it.name)),
@@ -1592,6 +1600,53 @@ function Backup(p){
 
 function lsGet(key,def){try{var v=localStorage.getItem(key);return v!==null?JSON.parse(v):def;}catch(e){return def;}}
 function lsSet(key,val){try{localStorage.setItem(key,JSON.stringify(val));}catch(e){}}
+
+// One-time migration: convert all numeric IDs to strings so comparisons always work
+// This runs once on startup and marks itself done
+(function migrateIds(){
+  if(localStorage.getItem('kw_id_migrated')==='2') return;
+  try{
+    // Migrate customers
+    var custs=JSON.parse(localStorage.getItem('kw_custs')||'[]');
+    custs=custs.map(function(c){return Object.assign({},c,{id:String(c.id)});});
+    localStorage.setItem('kw_custs',JSON.stringify(custs));
+
+    // Migrate items
+    var items=JSON.parse(localStorage.getItem('kw_items')||'[]');
+    items=items.map(function(i){return Object.assign({},i,{id:String(i.id)});});
+    localStorage.setItem('kw_items',JSON.stringify(items));
+
+    // Migrate invoices — fix customerId and lineItem itemIds
+    var invs=JSON.parse(localStorage.getItem('kw_invoices')||'[]');
+    invs=invs.map(function(inv){
+      return Object.assign({},inv,{
+        id:String(inv.id),
+        customerId:String(inv.customerId),
+        lineItems:(inv.lineItems||[]).map(function(l){
+          return Object.assign({},l,{itemId:l.itemId?String(l.itemId):l.itemId});
+        })
+      });
+    });
+    localStorage.setItem('kw_invoices',JSON.stringify(invs));
+
+    // Migrate rates — rebuild keys with String ids
+    var rates=JSON.parse(localStorage.getItem('kw_rates')||'{}');
+    var newRates={};
+    Object.keys(rates).forEach(function(k){
+      // Key is "custId_itemId" — normalize both parts
+      var parts=k.split('_');
+      if(parts.length>=2){
+        var newKey=String(parts[0])+'_'+String(parts.slice(1).join('_'));
+        newRates[newKey]=rates[k];
+      } else {
+        newRates[k]=rates[k];
+      }
+    });
+    localStorage.setItem('kw_rates',JSON.stringify(newRates));
+
+    localStorage.setItem('kw_id_migrated','2');
+  }catch(e){}
+})();
 
 function App(){
   var PG=useState('dashboard'),page=PG[0],setPage=PG[1];
