@@ -111,7 +111,7 @@ var LOGO = document.getElementById('KW_LOGO').src;
 function fmt(n){return '$'+(parseFloat(n)||0).toFixed(2);}
 function today(){return new Date().toISOString().split('T')[0];}
 function buildNo(s){var n=parseInt(s.nextNum)||1;return(s.prefix||'INV')+(s.separator||'-')+n.toString().padStart(parseInt(s.padding)||4,'0');}
-function effRate(cid,item,rates){var k=cid+'_'+item.id;return rates[k]!==undefined?rates[k]:item.defaultRate;}
+function effRate(cid,item,rates){var k=String(cid)+'_'+String(item.id);return rates[k]!==undefined?rates[k]:item.defaultRate;}
 function dlFile(b64,name,mime){var a=document.createElement('a');a.href='data:'+mime+';base64,'+b64;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);}
 
 function buildXLSX(invs){
@@ -439,10 +439,10 @@ function autoSyncToDrive(newInv,allInvoices,doneCb){
 <script>
 (function(){
 var h=React.createElement, useState=React.useState, useEffect=React.useEffect;
-var NCid=3, NIid=7;
-var IC=[{id:1,businessName:'Apex Traders',address:'123 Commerce Blvd, Newark NJ 07101',contactName:'John Apex',phone:'732-555-0101'},{id:2,businessName:'Blue Ridge Supply',address:'88 Industrial Ave, Edison NJ 08817',contactName:'Sara Ridge',phone:'732-555-0202'}];
-var II=[{id:1,name:'Steel Pipe 1-inch',defaultRate:45,category:'taxable'},{id:2,name:'Copper Wire 10AWG',defaultRate:78.5,category:'taxable'},{id:3,name:'Lumber 2x4x8',defaultRate:12,category:'taxable'},{id:4,name:'Consulting Services',defaultRate:125,category:'nontaxable'},{id:5,name:'Freight Adjustment',defaultRate:50,category:'nontaxable'},{id:6,name:'Labor Hours',defaultRate:95,category:'nontaxable'}];
-var IR={'1_1':42,'1_2':75,'2_3':11};
+// IDs now use random strings — no counters needed
+var IC=[{id:'c001',businessName:'Apex Traders',address:'123 Commerce Blvd, Newark NJ 07101',contactName:'John Apex',phone:'732-555-0101'},{id:'c002',businessName:'Blue Ridge Supply',address:'88 Industrial Ave, Edison NJ 08817',contactName:'Sara Ridge',phone:'732-555-0202'}];
+var II=[{id:'i001',name:'Steel Pipe 1-inch',defaultRate:45,category:'taxable'},{id:'i002',name:'Copper Wire 10AWG',defaultRate:78.5,category:'taxable'},{id:'i003',name:'Lumber 2x4x8',defaultRate:12,category:'taxable'},{id:'i004',name:'Consulting Services',defaultRate:125,category:'nontaxable'},{id:'i005',name:'Freight Adjustment',defaultRate:50,category:'nontaxable'},{id:'i006',name:'Labor Hours',defaultRate:95,category:'nontaxable'}];
+var IR={'c001_i001':42,'c001_i002':75,'c002_i003':11};
 
 function Dashboard(p){
   var tot=p.invoices.reduce(function(s,i){return s+i.grandTotal;},0);
@@ -510,7 +510,7 @@ function Customers(p){
       });
     } else {
       // Add — use random string as ID, impossible to collide
-      var newId = Math.random().toString(36).slice(2)+Date.now().toString(36);
+      var newId = Math.random().toString(36).slice(2,9)+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
       p.setCusts(function(cs){
         return cs.concat([{id:newId, businessName:bn, address:addr, contactName:con, phone:ph}]);
       });
@@ -573,18 +573,37 @@ function Customers(p){
 function Items(p){
   var T=useState('all'),tab=T[0],setTab=T[1];
   var S=useState(false),show=S[0],setShow=S[1];
-  var E=useState(null),eid=E[0],setEid=E[1];
-  var F=useState({name:'',defaultRate:'',category:'taxable'}),form=F[0],setForm=F[1];
+  // Flat state — no stale closure / type issues
+  var _eid=useState(''),eid=_eid[0],setEid=_eid[1];
+  var _iname=useState(''),iname=_iname[0],setIname=_iname[1];
+  var _irate=useState(''),irate=_irate[0],setIrate=_irate[1];
+  var _icat=useState('taxable'),icat=_icat[0],setIcat=_icat[1];
+  // Keep form as alias for compat with paste mode
+  var form={name:iname,defaultRate:irate,category:icat};
   var M=useState('single'),mode=M[0],setMode=M[1];
   var PT=useState(''),pt=PT[0],setPt=PT[1];
   var PR=useState([]),pr=PR[0],setPr=PR[1];
   var PC=useState('taxable'),pc=PC[0],setPc=PC[1];
   var disp=tab==='all'?p.items:p.items.filter(function(i){return i.category===tab;});
-  function openAdd(){setEid(null);setMode('single');setForm({name:'',defaultRate:'',category:tab==='nontaxable'?'nontaxable':'taxable'});setPt('');setPr([]);setShow(true);}
-  function openEdit(it){setEid(it.id);setMode('single');setForm({name:it.name,defaultRate:String(it.defaultRate),category:it.category});setShow(true);}
-  function saveSingle(){if(!form.name.trim())return;var item={name:form.name.trim(),defaultRate:parseFloat(form.defaultRate)||0,category:form.category};if(eid)p.setItems(function(its){return its.map(function(i){return i.id==eid?Object.assign({},item,{id:i.id}):i;});});else{var id=NIid++;p.setItems(function(its){return its.concat([Object.assign({},item,{id:id})]);});}setShow(false);}
+  function openAdd(){setEid('');setMode('single');setIname('');setIrate('');setIcat(tab==='nontaxable'?'nontaxable':'taxable');setPt('');setPr([]);setShow(true);}
+  function openEdit(it){setEid(String(it.id));setMode('single');setIname(it.name||'');setIrate(String(it.defaultRate||0));setIcat(it.category||'taxable');setShow(true);}
+  function saveSingle(){
+    if(!iname.trim())return;
+    var itemData={name:iname.trim(),defaultRate:parseFloat(irate)||0,category:icat};
+    if(eid){
+      p.setItems(function(its){
+        return its.map(function(i){
+          return String(i.id)===eid ? Object.assign({},itemData,{id:i.id}) : i;
+        });
+      });
+    } else {
+      var newId=Math.random().toString(36).slice(2,9)+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+      p.setItems(function(its){ return its.concat([Object.assign({},itemData,{id:newId})]); });
+    }
+    setShow(false);
+  }
   function del(id){if(confirm('Remove?'))p.setItems(function(its){return its.filter(function(i){return i.id!=id;});});}
-  function fi(k,v){setForm(function(f){var o=Object.assign({},f);o[k]=v;return o;});}
+  // fi() replaced by flat state setters
   function parsePaste(text){if(!text.trim()){setPr([]);return;}
     var rows=text.split('\n').map(function(l){return l.trim();}).filter(Boolean).map(function(line){
       var c=line.replace(/^[\d]+[.)]\s*/,'').replace(/^[*\u2022\-]\s*/,'').trim();
@@ -596,7 +615,14 @@ function Items(p){
     });
     setPr(rows);
   }
-  function savePaste(){var n=pr.filter(function(r){return r.name;});if(!n.length)return;p.setItems(function(its){return its.concat(n.map(function(r){return{id:NIid++,name:r.name.trim(),defaultRate:parseFloat(r.defaultRate)||0,category:pc};}));});setShow(false);}
+  function savePaste(){var n=pr.filter(function(r){return r.name;});if(!n.length)return;p.setItems(function(its){
+      var base=Date.now();
+      return its.concat(n.map(function(r,idx){
+        // Add idx offset so IDs are unique even in same millisecond
+        var uid=Math.random().toString(36).slice(2,9)+(base+idx).toString(36);
+        return{id:uid,name:r.name.trim(),defaultRate:parseFloat(r.defaultRate)||0,category:pc};
+      }));
+    });setShow(false);}
   function upr(idx,k,v){setPr(function(rows){return rows.map(function(r,i){return i===idx?Object.assign({},r,{valid:true,[k]:v}):r;});});}
   return h('div',null,
     h('div',{className:'page-hdr'},h('h2',null,'Item Master')),
@@ -629,8 +655,8 @@ function Items(p){
           h('button',{className:'btn btn-sm '+(mode==='paste'?'btn-purple':'btn-secondary'),onClick:function(){setMode('paste');}},'\uD83D\uDCCB Paste List')
         ),
         (eid||mode==='single')&&h('div',null,
-          h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Name *'),h('input',{value:form.name,onChange:function(e){fi('name',e.target.value);}}))),
-          h('div',{className:'form-row c2'},h('div',{className:'fg'},h('label',null,'Category'),h('select',{value:form.category,onChange:function(e){fi('category',e.target.value);}},h('option',{value:'taxable'},'Taxable'),h('option',{value:'nontaxable'},'Non-Taxable'))),h('div',{className:'fg'},h('label',null,'Rate ($)'),h('input',{type:'number',step:'0.01',value:form.defaultRate,onChange:function(e){fi('defaultRate',e.target.value);}})))
+          h('div',{className:'form-row'},h('div',{className:'fg'},h('label',null,'Name *'),h('input',{value:iname,onChange:function(e){setIname(e.target.value);}}))),
+          h('div',{className:'form-row c2'},h('div',{className:'fg'},h('label',null,'Category'),h('select',{value:icat,onChange:function(e){setIcat(e.target.value);}},h('option',{value:'taxable'},'Taxable'),h('option',{value:'nontaxable'},'Non-Taxable'))),h('div',{className:'fg'},h('label',null,'Rate ($)'),h('input',{type:'number',step:'0.01',value:irate,onChange:function(e){setIrate(e.target.value);}})))
         ),
         (!eid&&mode==='paste')&&h('div',null,
           h('div',{className:'form-row'},h('div',{className:'fg',style:{maxWidth:200}},h('label',null,'Category'),h('select',{value:pc,onChange:function(e){setPc(e.target.value);}},h('option',{value:'taxable'},'Taxable'),h('option',{value:'nontaxable'},'Non-Taxable')))),
@@ -669,10 +695,10 @@ function CustRates(p){
   var taxItems=allItems.filter(function(i){return i.category==='taxable';});
   var ntItems=allItems.filter(function(i){return i.category==='nontaxable';});
 
-  function getR(cid,iid){var k=cid+'_'+iid;return p.rates[k]!==undefined?String(p.rates[k])||'':'';}
-  function setR(cid,iid,val){p.setRates(function(r){var o=Object.assign({},r),k=cid+'_'+iid;if(val===''||val===null)delete o[k];else o[k]=parseFloat(val)||0;return o;});}
-  function hasCustom(cid,iid){return p.rates[cid+'_'+iid]!==undefined;}
-  function clearR(cid,iid){p.setRates(function(r){var o=Object.assign({},r);delete o[cid+'_'+iid];return o;});}
+  function getR(cid,iid){var k=String(cid)+'_'+String(iid);return p.rates[k]!==undefined?String(p.rates[k])||'':'';}
+  function setR(cid,iid,val){p.setRates(function(r){var o=Object.assign({},r),k=String(cid)+'_'+String(iid);if(val===''||val===null)delete o[k];else o[k]=parseFloat(val)||0;return o;});}
+  function hasCustom(cid,iid){return p.rates[String(cid)+'_'+String(iid)]!==undefined;}
+  function clearR(cid,iid){p.setRates(function(r){var o=Object.assign({},r);delete o[String(cid)+'_'+String(iid)];return o;});}
 
   function RateRow(it){
     var cid=String(cust.id);
@@ -834,7 +860,7 @@ function NewInvoice(p){
     function isLocked(l){
       var item=p.items.find(function(it){return it.id===l.itemId;});
       if(!item)return false;
-      var custKey=String(cust.id)+'_'+l.itemId;
+      var custKey=String(cust.id)+'_'+String(l.itemId);
       return p.rates[custKey]!==undefined; // has a customer-specific rate → locked
     }
 
